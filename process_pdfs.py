@@ -1,4 +1,4 @@
---- START OF FILE process_pdfs.py ---
+
 
 import google.generativeai as genai
 import os
