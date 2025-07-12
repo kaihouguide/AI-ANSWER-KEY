@@ -42,7 +42,7 @@ Your task is to process the following worksheet:
 - `{worksheet_name}`
 
 **Core Task: Recreate the Worksheet with Impeccable Solutions**
-Your goal is to SOLVE THE ENTIRE EXAM, remaking it with the highest possible accuracy and clarity.
+Your most important goal is to SOLVE THE ENTIRE EXAM, remaking it with the highest possible accuracy and clarity. You must complete every single problem.
 1.  **Preserve Structure:** Replicate the original structure, numbering, and layout as closely as possible within the professional HTML format.
 2.  **Transcribe the Problem:** For every problem, transcribe the question exactly as it appears into a `<div class="problem-statement">`.
 3.  **Provide the Solution:** Write your full, detailed, step-by-step solution in the `<div class="solution">` that immediately follows.
@@ -328,37 +328,9 @@ def save_session(training_pdf_paths, uploaded_files):
     try:
         with open(SESSION_FILE, "w") as f:
             json.dump(session_data, f, indent=4)
-        print(f"{C_GREEN}[i] Session data saved to {SESSION_FILE} for future use.{C_END}")
+        print(f"{C_GREEN}[i] Session data updated in {SESSION_FILE}.{C_END}")
     except Exception as e:
         print(f"{C_YELLOW}[WARNING] Could not save session data: {e}{C_END}")
-
-def load_session():
-    """Loads and verifies a previous session, asking the user for confirmation."""
-    if not os.path.exists(SESSION_FILE):
-        return None
-    try:
-        with open(SESSION_FILE, "r") as f:
-            session_data = json.load(f)
-        if not session_data:
-            return None
-
-        print(f"\n{C_BLUE}Found a previous session with the following training files:{C_END}")
-        for item in session_data:
-            print(f" - {C_YELLOW}{item['local_name']}{C_END}")
-
-        choice = input(f"{C_BOLD}Would you like to reuse these files and skip re-uploading? (y/n): {C_END}").lower()
-
-        if choice == 'y':
-            print("Reusing session files. Verifying with Google's servers...")
-            reused_files = [genai.get_file(name=item['server_id']) for item in session_data]
-            print(f"{C_GREEN}[+] Successfully restored and verified {len(reused_files)} file(s) from the previous session.{C_END}")
-            return reused_files
-        else:
-            print("Okay, starting a new session. The old session file will be overwritten on completion.")
-            return None
-    except Exception as e:
-        print(f"{C_RED}[WARNING] Could not load previous session: {e}. Starting a new one.{C_END}")
-        return None
 
 def upload_files_with_retry(file_paths, max_retries=3):
     uploaded_files = []
@@ -448,24 +420,69 @@ def main():
         print(f"{C_RED}[ERROR] One or both provided paths are not valid directories.{C_END}")
         return
 
+    # --- Phase 1: Intelligent File Upload Management ---
+    print(f"\n{C_BLUE}{C_BOLD}--- Phase 1: Managing Training Material ---{C_END}")
+    
     training_pdf_paths = list(training_path.glob("*.pdf"))
     training_files = []
-    
-    # --- Session Management Logic ---
-    training_files = load_session()
-    if training_files is None:
-        # --- Phase 1: Uploading Training Material ---
-        print(f"\n{C_BLUE}{C_BOLD}--- Phase 1: Uploading New Training Material ---{C_END}")
-        if not training_pdf_paths:
-            print(f"{C_YELLOW}[WARNING] No training PDFs found. The AI will use its general knowledge.{C_END}")
-        else:
+
+    if not training_pdf_paths:
+        print(f"{C_YELLOW}[WARNING] No training PDFs found. The AI will use its general knowledge.{C_END}")
+    else:
+        # Load existing session if available
+        session_files = {}
+        if Path(SESSION_FILE).exists():
             try:
-                training_files = upload_files_with_retry(training_pdf_paths)
-                print(f"{C_GREEN}[+] Successfully uploaded {len(training_files)} new training file(s).{C_END}")
-                save_session(training_pdf_paths, training_files)
+                with open(SESSION_FILE, 'r') as f:
+                    session_data = json.load(f)
+                    session_files = {item['local_name']: item['server_id'] for item in session_data}
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"{C_YELLOW}[WARNING] Could not read session file '{SESSION_FILE}': {e}. Treating all files as new.{C_END}")
+                session_files = {}
+
+        # Identify new vs. existing files by comparing folder contents to session data
+        current_filenames = {p.name for p in training_pdf_paths}
+        session_filenames = set(session_files.keys())
+
+        new_file_names = current_filenames - session_filenames
+        existing_file_names = current_filenames.intersection(session_filenames)
+        
+        paths_to_upload = [p for p in training_pdf_paths if p.name in new_file_names]
+        reused_files = []
+        
+        # Verify and reuse existing files
+        if existing_file_names:
+            print(f"[*] Found {len(existing_file_names)} existing file(s) in session. Verifying...")
+            verified_count = 0
+            for name in sorted(list(existing_file_names)):
+                server_id = session_files[name]
+                try:
+                    reused_file = genai.get_file(name=server_id)
+                    reused_files.append(reused_file)
+                    verified_count += 1
+                except Exception as e:
+                    print(f"  -> {C_YELLOW}[WARNING] Could not verify '{name}' (ID: {server_id}). It will be re-uploaded. Error: {e}{C_END}")
+                    paths_to_upload.append(training_path / name)
+            if verified_count > 0:
+                print(f"  -> {C_GREEN}Successfully verified and reused {verified_count} file(s).{C_END}")
+
+        # Upload any new or unverified files
+        newly_uploaded_files = []
+        if paths_to_upload:
+            print(f"[*] Found {len(paths_to_upload)} new or unverified file(s) to upload.")
+            try:
+                newly_uploaded_files = upload_files_with_retry(paths_to_upload)
+                print(f"  -> {C_GREEN}Successfully uploaded {len(newly_uploaded_files)} new file(s).{C_END}")
             except Exception as e:
                 print(f"{C_RED}[FATAL] Could not upload training files. Aborting. Error: {e}{C_END}")
                 return
+
+        # Combine lists and update the session file for the next run
+        training_files = reused_files + newly_uploaded_files
+        if training_files:
+            path_map = {p.name: p for p in training_pdf_paths}
+            final_local_paths_for_session = [path_map[f.display_name] for f in training_files if f.display_name in path_map]
+            save_session(final_local_paths_for_session, training_files)
 
     print(f"\n{C_BLUE}{C_BOLD}--- Phase 2: Processing Worksheets in Parallel (max {args.max_workers} at a time) ---{C_END}")
     worksheet_pdf_paths = list(worksheets_path.glob("*.pdf"))
