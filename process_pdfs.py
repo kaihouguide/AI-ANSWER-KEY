@@ -316,11 +316,13 @@ you don't have to mention what pdf you got the concept/solution from.
 
 def configure_ai():
     """Loads API key from .env file and configures the Generative AI client."""
+    print(f"{C_BLUE}[DEBUG] Attempting to configure AI...{C_END}") ### DEBUG ###
     load_dotenv(override=True)
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise ValueError(f"{C_RED}Google API Key not found. Please set the GOOGLE_API_KEY in your .env file.{C_END}")
     genai.configure(api_key=api_key)
+    print(f"{C_GREEN}[DEBUG] AI configured successfully.{C_END}") ### DEBUG ###
 
 def upload_files_with_retry(file_paths, max_retries=3):
     uploaded_files = []
@@ -355,8 +357,14 @@ def manage_training_files(training_pdf_paths):
     if Path(SESSION_FILE).exists():
         try:
             with open(SESSION_FILE, "r") as f:
-                # Session file stores a dictionary: {"local_filename": "server_id"}
                 session_data = json.load(f)
+            # --- START: ROBUSTNESS FIX ---
+            # Verify that the loaded data is a dictionary. If not, treat as empty.
+            if not isinstance(session_data, dict):
+                print(f"{C_YELLOW}[WARNING] Session file '{SESSION_FILE}' was malformed (not a dictionary). "
+                      f"A new session will be created and all training files will be re-uploaded.{C_END}")
+                session_data = {}
+            # --- END: ROBUSTNESS FIX ---
         except (json.JSONDecodeError, IOError) as e:
             print(f"{C_YELLOW}[WARNING] Could not read session file {SESSION_FILE}: {e}. Starting fresh.{C_END}")
             session_data = {}
@@ -379,7 +387,6 @@ def manage_training_files(training_pdf_paths):
             except Exception as e:
                 print(f" {C_YELLOW}[!] Could not verify '{local_name}' (ID: {server_id}). It will be re-uploaded. Reason: {e}{C_END}")
                 files_to_upload_paths.append(all_current_local_paths[local_name])
-                # Remove stale entry from session so it gets updated
                 if local_name in session_data:
                     del session_data[local_name]
         
@@ -390,7 +397,6 @@ def manage_training_files(training_pdf_paths):
     if files_to_upload_paths:
         print(f"\n{C_BLUE}{C_BOLD}--- Uploading New/Updated Training Material ---{C_END}")
         try:
-            # The function now returns a list of dictionaries
             newly_uploaded_file_info = upload_files_with_retry(files_to_upload_paths)
             
             newly_uploaded_files = []
@@ -398,14 +404,12 @@ def manage_training_files(training_pdf_paths):
                 uploaded_file = info['file']
                 original_path = info['path']
                 newly_uploaded_files.append(uploaded_file)
-                # Update session data with the new file's ID
                 session_data[original_path.name] = uploaded_file.name
 
             if newly_uploaded_files:
                  print(f"{C_GREEN}[+] Successfully uploaded {len(newly_uploaded_files)} new/updated training file(s).{C_END}")
 
         except Exception as e:
-            # Re-raise to stop the main script from proceeding with incomplete files
             print(f"{C_RED}[FATAL] Could not upload training files. Aborting. Error: {e}{C_END}")
             raise
 
@@ -586,6 +590,14 @@ def main():
     parser.add_argument("--worksheets-folder", type=str, required=True, help="Path to the folder with 'worksheet' PDFs to be solved.")
     parser.add_argument("--max-workers", type=int, default=5, help="Maximum number of worksheets to process in parallel.")
     args = parser.parse_args()
+    
+    ### DEBUG ###
+    print(f"{C_BLUE}{C_BOLD}[DEBUG] Script starting...{C_END}")
+    print(f"{C_BLUE}[DEBUG] Arguments received:{C_END}")
+    print(f"{C_BLUE}[DEBUG]   -> Training Folder: {args.training_folder}{C_END}")
+    print(f"{C_BLUE}[DEBUG]   -> Worksheets Folder: {args.worksheets_folder}{C_END}")
+    print(f"{C_BLUE}[DEBUG]   -> Max Workers: {args.max_workers}{C_END}")
+    ### END DEBUG ###
 
     try:
         configure_ai()
@@ -593,18 +605,33 @@ def main():
         print(e)
         return
 
-    training_path = Path(args.training_folder)
-    worksheets_path = Path(args.worksheets_folder)
+    training_path = Path(args.training_folder).resolve() ### DEBUG: Use resolve() for absolute path ###
+    worksheets_path = Path(args.worksheets_folder).resolve() ### DEBUG: Use resolve() for absolute path ###
     temp_dir = Path("./temp_processing_files")
+
+    ### DEBUG ###
+    print(f"{C_BLUE}[DEBUG] Resolved Training Path: {training_path}{C_END}")
+    print(f"{C_BLUE}[DEBUG] Resolved Worksheets Path: {worksheets_path}{C_END}")
+    ### END DEBUG ###
 
     if not training_path.is_dir() or not worksheets_path.is_dir():
         print(f"{C_RED}[ERROR] One or both provided paths are not valid directories.{C_END}")
+        if not training_path.is_dir():
+             print(f"{C_RED}[ERROR]   -> Path not found or not a directory: {training_path}{C_END}")
+        if not worksheets_path.is_dir():
+             print(f"{C_RED}[ERROR]   -> Path not found or not a directory: {worksheets_path}{C_END}")
         return
         
     temp_dir.mkdir(exist_ok=True)
 
     training_pdf_paths = list(training_path.glob("*.pdf"))
     
+    ### DEBUG ###
+    print(f"{C_BLUE}[DEBUG] Found {len(training_pdf_paths)} PDF(s) in the training folder.{C_END}")
+    for pdf in training_pdf_paths:
+        print(f"{C_BLUE}[DEBUG]   -> Found: {pdf.name}{C_END}")
+    ### END DEBUG ###
+
     # --- Phase 1: Cumulative Session and Training File Management ---
     try:
         training_files = manage_training_files(training_pdf_paths)
@@ -614,17 +641,23 @@ def main():
              print(f"{C_RED}[ERROR] No training files were successfully uploaded or verified. Aborting.{C_END}")
              shutil.rmtree(temp_dir)
              return
-    except Exception:
-        # The error is already printed in the manage_training_files function
+    except Exception as e:
+        print(f"{C_RED}[FATAL ERROR] An exception occurred during training file management: {e}{C_END}") ### DEBUG ###
         shutil.rmtree(temp_dir)
         return
 
     print(f"\n{C_BLUE}{C_BOLD}--- Phase 2: Processing Worksheets in Parallel (max {args.max_workers} at a time) ---{C_END}")
     worksheet_pdf_paths = list(worksheets_path.glob("*.pdf"))
     total_worksheets = len(worksheet_pdf_paths)
+    
+    ### DEBUG ###
+    print(f"{C_BLUE}[DEBUG] Found {len(worksheet_pdf_paths)} PDF(s) in the worksheets folder.{C_END}")
+    for pdf in worksheet_pdf_paths:
+        print(f"{C_BLUE}[DEBUG]   -> Found: {pdf.name}{C_END}")
+    ### END DEBUG ###
 
     if not worksheet_pdf_paths:
-        print("No worksheet PDFs found to process.")
+        print("No worksheet PDFs found to process. Exiting.") ### DEBUG: More explicit message ###
         shutil.rmtree(temp_dir)
         return
 
@@ -661,6 +694,7 @@ def main():
 
     # Clean up the main temporary directory
     if temp_dir.exists():
+        print(f"{C_BLUE}[DEBUG] Cleaning up temporary directory: {temp_dir}{C_END}") ### DEBUG ###
         shutil.rmtree(temp_dir)
 
     script_end_time = time.time()
@@ -677,6 +711,7 @@ def main():
         print(f"Average time per processed worksheet: {format_time(avg_time)}")
         
     print(f"{C_BOLD}Total execution time: {format_time(total_duration)}{C_END}")
+    print(f"{C_BLUE}{C_BOLD}[DEBUG] Script finished.{C_END}") ### DEBUG ###
 
 if __name__ == "__main__":
     main()
