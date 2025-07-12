@@ -1,4 +1,4 @@
-
+--- START OF FILE process_pdfs.py ---
 
 import google.generativeai as genai
 import os
@@ -664,8 +664,8 @@ def main():
         shutil.rmtree(temp_dir)
         return
 
-    # Use the gemini-1.5-pro-latest model
-    model = genai.GenerativeModel('models/gemini-1.5-pro-latest')
+    # Use the gemini-2.5-pro model
+    model = genai.GenerativeModel('models/gemini-2.5-pro')
     
     processing_times = []
     success_count = 0
