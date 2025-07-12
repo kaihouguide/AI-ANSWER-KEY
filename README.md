@@ -1,4 +1,3 @@
-Of course. Here is your finalized text formatted as a professional GitHub README in Markdown.
 
 # PDF Answer Key Generator
 
