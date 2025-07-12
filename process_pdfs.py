@@ -1,3 +1,5 @@
+
+
 import google.generativeai as genai
 import os
 import argparse
@@ -376,6 +378,8 @@ def manage_training_files(training_pdf_paths):
     known_files_to_verify = {name: server_id for name, server_id in session_data.items() if name in all_current_local_paths}
 
     verified_files = []
+    newly_uploaded_files = [] # <<< FIX: Initialize list here to ensure it always exists.
+
     # --- Verify existing files ---
     if known_files_to_verify:
         print(f"\n{C_BLUE}--- Verifying Previously Uploaded Training Files ---{C_END}")
@@ -399,7 +403,6 @@ def manage_training_files(training_pdf_paths):
         try:
             newly_uploaded_file_info = upload_files_with_retry(files_to_upload_paths)
             
-            newly_uploaded_files = []
             for info in newly_uploaded_file_info:
                 uploaded_file = info['file']
                 original_path = info['path']
