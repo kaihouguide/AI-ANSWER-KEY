@@ -1,5 +1,3 @@
-
-
 import google.generativeai as genai
 import os
 import argparse
@@ -8,9 +6,6 @@ from dotenv import load_dotenv
 import time
 import concurrent.futures
 import json
-import fitz  # PyMuPDF
-from bs4 import BeautifulSoup
-import shutil
 
 # --- ANSI Color Codes for Rich Console Output ---
 C_GREEN = '\033[92m'
@@ -318,270 +313,116 @@ you don't have to mention what pdf you got the concept/solution from.
 
 def configure_ai():
     """Loads API key from .env file and configures the Generative AI client."""
-    print(f"{C_BLUE}[DEBUG] Attempting to configure AI...{C_END}") ### DEBUG ###
     load_dotenv(override=True)
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise ValueError(f"{C_RED}Google API Key not found. Please set the GOOGLE_API_KEY in your .env file.{C_END}")
     genai.configure(api_key=api_key)
-    print(f"{C_GREEN}[DEBUG] AI configured successfully.{C_END}") ### DEBUG ###
+
+def save_session(training_pdf_paths, uploaded_files):
+    """Saves the server-side file IDs to a session file for future reuse."""
+    session_data = [
+        {"local_name": path.name, "server_id": file.name}
+        for path, file in zip(training_pdf_paths, uploaded_files)
+    ]
+    try:
+        with open(SESSION_FILE, "w") as f:
+            json.dump(session_data, f, indent=4)
+        print(f"{C_GREEN}[i] Session data saved to {SESSION_FILE} for future use.{C_END}")
+    except Exception as e:
+        print(f"{C_YELLOW}[WARNING] Could not save session data: {e}{C_END}")
+
+def load_session():
+    """Loads and verifies a previous session, asking the user for confirmation."""
+    if not os.path.exists(SESSION_FILE):
+        return None
+    try:
+        with open(SESSION_FILE, "r") as f:
+            session_data = json.load(f)
+        if not session_data:
+            return None
+
+        print(f"\n{C_BLUE}Found a previous session with the following training files:{C_END}")
+        for item in session_data:
+            print(f" - {C_YELLOW}{item['local_name']}{C_END}")
+
+        choice = input(f"{C_BOLD}Would you like to reuse these files and skip re-uploading? (y/n): {C_END}").lower()
+
+        if choice == 'y':
+            print("Reusing session files. Verifying with Google's servers...")
+            reused_files = [genai.get_file(name=item['server_id']) for item in session_data]
+            print(f"{C_GREEN}[+] Successfully restored and verified {len(reused_files)} file(s) from the previous session.{C_END}")
+            return reused_files
+        else:
+            print("Okay, starting a new session. The old session file will be overwritten on completion.")
+            return None
+    except Exception as e:
+        print(f"{C_RED}[WARNING] Could not load previous session: {e}. Starting a new one.{C_END}")
+        return None
 
 def upload_files_with_retry(file_paths, max_retries=3):
     uploaded_files = []
-    # Use a dictionary to keep track of original paths for uploaded files
-    path_map = {path.resolve(): path for path in file_paths}
-    resolved_paths = list(path_map.keys())
-
-    for path in resolved_paths:
-        original_path = path_map[path]
+    for path in file_paths:
         for attempt in range(max_retries):
             try:
-                print(f" - Uploading: {C_YELLOW}{original_path.name}{C_END}...")
-                uploaded_file = genai.upload_file(path=original_path, display_name=original_path.name)
-                # Store the original path alongside the uploaded file object
-                uploaded_files.append({'file': uploaded_file, 'path': original_path})
+                print(f" - Uploading: {C_YELLOW}{path.name}{C_END}...")
+                uploaded_file = genai.upload_file(path=path, display_name=path.name)
+                uploaded_files.append(uploaded_file)
                 break
             except Exception as e:
-                print(f" {C_RED}[!] Attempt {attempt + 1} failed for {original_path.name}: {e}{C_END}")
+                print(f" {C_RED}[!] Attempt {attempt + 1} failed for {path.name}: {e}{C_END}")
                 if attempt + 1 == max_retries:
-                    print(f" {C_RED}[!] Failed to upload {original_path.name} after {max_retries} attempts.{C_END}")
+                    print(f" {C_RED}[!] Failed to upload {path.name} after {max_retries} attempts.{C_END}")
                     raise
                 time.sleep(2 ** attempt)
     return uploaded_files
 
-def manage_training_files(training_pdf_paths):
+def process_single_worksheet(ws_path, training_files, model):
     """
-    Manages training files by loading known files from a session,
-    uploading new ones, and saving the updated cumulative session.
-    Returns a list of verified `genai.File` objects.
-    """
-    session_data = {}
-    if Path(SESSION_FILE).exists():
-        try:
-            with open(SESSION_FILE, "r") as f:
-                session_data = json.load(f)
-            # --- START: ROBUSTNESS FIX ---
-            # Verify that the loaded data is a dictionary. If not, treat as empty.
-            if not isinstance(session_data, dict):
-                print(f"{C_YELLOW}[WARNING] Session file '{SESSION_FILE}' was malformed (not a dictionary). "
-                      f"A new session will be created and all training files will be re-uploaded.{C_END}")
-                session_data = {}
-            # --- END: ROBUSTNESS FIX ---
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"{C_YELLOW}[WARNING] Could not read session file {SESSION_FILE}: {e}. Starting fresh.{C_END}")
-            session_data = {}
-
-    local_filenames_in_session = set(session_data.keys())
-    all_current_local_paths = {p.name: p for p in training_pdf_paths}
-
-    files_to_upload_paths = [p for name, p in all_current_local_paths.items() if name not in local_filenames_in_session]
-    known_files_to_verify = {name: server_id for name, server_id in session_data.items() if name in all_current_local_paths}
-
-    verified_files = []
-    newly_uploaded_files = [] # <<< FIX: Initialize list here to ensure it always exists.
-
-    # --- Verify existing files ---
-    if known_files_to_verify:
-        print(f"\n{C_BLUE}--- Verifying Previously Uploaded Training Files ---{C_END}")
-        for local_name, server_id in known_files_to_verify.items():
-            try:
-                print(f" - Verifying: {C_YELLOW}{local_name}{C_END}...")
-                verified_file = genai.get_file(name=server_id)
-                verified_files.append(verified_file)
-            except Exception as e:
-                print(f" {C_YELLOW}[!] Could not verify '{local_name}' (ID: {server_id}). It will be re-uploaded. Reason: {e}{C_END}")
-                files_to_upload_paths.append(all_current_local_paths[local_name])
-                if local_name in session_data:
-                    del session_data[local_name]
-        
-        if verified_files:
-             print(f"{C_GREEN}[+] Verified and reused {len(verified_files)} file(s).{C_END}")
-
-    # --- Upload new files ---
-    if files_to_upload_paths:
-        print(f"\n{C_BLUE}{C_BOLD}--- Uploading New/Updated Training Material ---{C_END}")
-        try:
-            newly_uploaded_file_info = upload_files_with_retry(files_to_upload_paths)
-            
-            for info in newly_uploaded_file_info:
-                uploaded_file = info['file']
-                original_path = info['path']
-                newly_uploaded_files.append(uploaded_file)
-                session_data[original_path.name] = uploaded_file.name
-
-            if newly_uploaded_files:
-                 print(f"{C_GREEN}[+] Successfully uploaded {len(newly_uploaded_files)} new/updated training file(s).{C_END}")
-
-        except Exception as e:
-            print(f"{C_RED}[FATAL] Could not upload training files. Aborting. Error: {e}{C_END}")
-            raise
-
-    # --- Save the updated session ---
-    try:
-        with open(SESSION_FILE, "w") as f:
-            json.dump(session_data, f, indent=4)
-        print(f"{C_GREEN}[i] Cumulative session data updated in {SESSION_FILE}.{C_END}")
-    except Exception as e:
-        print(f"{C_YELLOW}[WARNING] Could not save session data: {e}{C_END}")
-
-    return verified_files + newly_uploaded_files
-
-
-def split_pdf(pdf_path, output_dir):
-    """Splits a PDF into single pages."""
-    output_dir.mkdir(exist_ok=True)
-    pdf_document = fitz.open(pdf_path)
-    page_paths = []
-    for page_num in range(len(pdf_document)):
-        page = pdf_document.load_page(page_num)
-        output_path = output_dir / f"page_{page_num + 1}.pdf"
-        new_pdf = fitz.open()
-        new_pdf.insert_pdf(pdf_document, from_page=page_num, to_page=page_num)
-        new_pdf.save(str(output_path))
-        new_pdf.close()
-        page_paths.append(output_path)
-    pdf_document.close()
-    return page_paths
-
-def merge_html_files(html_files, output_path, worksheet_name):
-    """Merges multiple HTML files into a single file."""
-    if not html_files:
-        return
-
-    # Use the first HTML file as the base template
-    with open(html_files[0], 'r', encoding='utf-8') as f:
-        soup = BeautifulSoup(f, 'html.parser')
-
-    # Find the main container to append content to
-    main_container = soup.find('div', class_='container')
-    if not main_container:
-        # If no container, use the body as a fallback
-        main_container = soup.body
-
-    # Clear existing generated content from the template before merging
-    if main_container:
-        for element in main_container.find_all(["h3", "div", "hr"]):
-             if 'problem-statement' in element.get('class', []) or \
-                'solution' in element.get('class', []) or \
-                'diagram-container' in element.get('class', []) or \
-                element.name == 'hr' or element.name == 'h3':
-                 element.decompose()
-
-
-    # Iterate through all HTML files (including the first) and append their content
-    for html_file in html_files:
-        with open(html_file, 'r', encoding='utf-8') as f:
-            page_soup = BeautifulSoup(f, 'html.parser')
-            # Find the content within the container of the page
-            page_content_container = page_soup.find('div', class_='container')
-            if page_content_container:
-                 # Append all children of the container to the main soup
-                 for child in page_content_container.children:
-                     if child.name: # Ensure it's a tag, not just a string
-                         main_container.append(child)
-
-    # Update the title and main heading
-    if soup.title:
-        soup.title.string = f"Answer Key: {worksheet_name}"
-    h2_heading = soup.find('h2')
-    if h2_heading:
-        h2_heading.string = f"Answer Key for {worksheet_name}"
-
-
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(str(soup.prettify()))
-
-def process_single_worksheet(ws_path, training_files, model, temp_dir):
-    """
-    Processes a single worksheet PDF by splitting it into pages,
-    generating HTML for each page, and then merging the results.
+    Processes a single worksheet PDF. This function is designed to be run in a separate thread.
+    Returns a tuple of (status, source_path, message/duration).
     """
     item_start_time = time.time()
     ws_name = ws_path.name
     output_path = ws_path.with_suffix('.key.html')
 
     if output_path.exists():
-        return ('skipped', ws_name, "Output file already exists.")
+        return ('skipped', ws_name, f"Output file already exists.")
 
     try:
-        # Create a temporary directory for this worksheet's pages
-        worksheet_temp_dir = temp_dir / ws_path.stem
-        worksheet_temp_dir.mkdir(exist_ok=True)
+        worksheet_file = upload_files_with_retry([ws_path])[0]
 
-        # 1. Split the PDF into pages
-        page_paths = split_pdf(ws_path, worksheet_temp_dir)
+        prompt = get_system_prompt(ws_name)
+        api_request_files = training_files + [worksheet_file]
+
+        print(f"[*] Generating answer key for {C_BOLD}{ws_name}{C_END} with {C_BLUE}Gemini 2.5 Pro{C_END}...")
         
-        generated_html_files = []
-        uploaded_page_files = []
-
-
-        # 2. Upload all pages first
-        print(f"[*] Pre-uploading all {len(page_paths)} pages for {C_BOLD}{ws_name}{C_END}...")
         try:
-            # upload_files_with_retry returns a list of dictionaries
-            uploaded_info = upload_files_with_retry(page_paths)
-            # We only need the genai.File object for the API call
-            uploaded_page_files = [info['file'] for info in uploaded_info]
-        except Exception as e:
-            return ('failed', ws_name, f"Could not pre-upload pages. Error: {e}")
+            response = model.generate_content([prompt] + api_request_files)
+            if not response.parts:
+                return('failed', ws_name, "Model returned an empty response. This may be due to a safety filter or content policy.")
+            html_content = response.text
+        except Exception as api_error:
+            return ('failed', ws_name, f"API Error: {api_error}")
 
-
-        # 3. Process each page sequentially
-        for i, (page_path, page_file) in enumerate(zip(page_paths, uploaded_page_files)):
-            page_name = page_path.name
-            page_output_path = worksheet_temp_dir / f"page_{i+1}.html"
-
-            try:
-                prompt = get_system_prompt(f"{ws_name} - Page {i+1}")
-                # Use the pre-uploaded file object
-                api_request_files = training_files + [page_file]
-
-                print(f"[*] Generating answer key for {C_BOLD}{ws_name} (Page {i+1}/{len(page_paths)}){C_END}...")
-                
-                try:
-                    response = model.generate_content(api_request_files) # Removed stream=True
-                    if not response.parts:
-                         print(f"  -> {C_YELLOW}[WARNING] Model returned an empty response for page {i+1}.{C_END}")
-                         continue
-
-                    html_content = response.text
-                except Exception as api_error:
-                    print(f"  -> {C_RED}[FAILED] API Error for page {i+1}: {api_error}{C_END}")
-                    continue
-
-                html_content = html_content.strip()
-                if html_content.startswith("```html"):
-                    html_content = html_content.removeprefix("```html").strip()
-                if html_content.endswith("```"):
-                    html_content = html_content.removesuffix("```").strip()
-                
-                if "<!DOCTYPE html>" not in html_content or "</body>" not in html_content:
-                    print(f"  -> {C_YELLOW}[WARNING] Model produced malformed HTML for page {i+1}. Snippet: {html_content[:200]}...{C_END}")
-                    continue
-
-                page_output_path.write_text(html_content, encoding='utf-8')
-                generated_html_files.append(page_output_path)
-
-            except Exception as e:
-                print(f"  -> {C_RED}[FAILED] Could not process page {i+1}: {e}{C_END}")
-                continue
+        html_content = html_content.strip()
+        # Clean up markdown code block fences if present at the start/end of the response
+        if html_content.startswith("```html"):
+            html_content = html_content.removeprefix("```html").strip()
+        if html_content.endswith("```"):
+            html_content = html_content.removesuffix("```").strip()
         
-        # 4. Merge the generated HTML files
-        if generated_html_files:
-            print(f"[*] Merging {len(generated_html_files)} HTML page(s) into final answer key for {C_BOLD}{ws_name}{C_END}...")
-            merge_html_files(generated_html_files, output_path, ws_name)
-            item_duration = time.time() - item_start_time
-            return ('success', ws_name, item_duration)
-        else:
-            return ('failed', ws_name, "No HTML pages were successfully generated.")
+        # Basic check to ensure it's valid HTML
+        if "<!DOCTYPE html>" not in html_content or "</body>" not in html_content:
+            return ('failed', ws_name, f"Model produced malformed HTML. Response snippet: {html_content[:500]}...") # Increased snippet length
+
+        output_path.write_text(html_content, encoding='utf-8')
+        
+        item_duration = time.time() - item_start_time
+        return ('success', ws_name, item_duration)
 
     except Exception as e:
         return ('failed', ws_name, str(e))
-    finally:
-        # 5. Clean up temporary files
-        if 'worksheet_temp_dir' in locals() and worksheet_temp_dir.exists():
-            shutil.rmtree(worksheet_temp_dir)
-
 
 def main():
     script_start_time = time.time()
@@ -593,14 +434,6 @@ def main():
     parser.add_argument("--worksheets-folder", type=str, required=True, help="Path to the folder with 'worksheet' PDFs to be solved.")
     parser.add_argument("--max-workers", type=int, default=5, help="Maximum number of worksheets to process in parallel.")
     args = parser.parse_args()
-    
-    ### DEBUG ###
-    print(f"{C_BLUE}{C_BOLD}[DEBUG] Script starting...{C_END}")
-    print(f"{C_BLUE}[DEBUG] Arguments received:{C_END}")
-    print(f"{C_BLUE}[DEBUG]   -> Training Folder: {args.training_folder}{C_END}")
-    print(f"{C_BLUE}[DEBUG]   -> Worksheets Folder: {args.worksheets_folder}{C_END}")
-    print(f"{C_BLUE}[DEBUG]   -> Max Workers: {args.max_workers}{C_END}")
-    ### END DEBUG ###
 
     try:
         configure_ai()
@@ -608,64 +441,42 @@ def main():
         print(e)
         return
 
-    training_path = Path(args.training_folder).resolve() ### DEBUG: Use resolve() for absolute path ###
-    worksheets_path = Path(args.worksheets_folder).resolve() ### DEBUG: Use resolve() for absolute path ###
-    temp_dir = Path("./temp_processing_files")
-
-    ### DEBUG ###
-    print(f"{C_BLUE}[DEBUG] Resolved Training Path: {training_path}{C_END}")
-    print(f"{C_BLUE}[DEBUG] Resolved Worksheets Path: {worksheets_path}{C_END}")
-    ### END DEBUG ###
+    training_path = Path(args.training_folder)
+    worksheets_path = Path(args.worksheets_folder)
 
     if not training_path.is_dir() or not worksheets_path.is_dir():
         print(f"{C_RED}[ERROR] One or both provided paths are not valid directories.{C_END}")
-        if not training_path.is_dir():
-             print(f"{C_RED}[ERROR]   -> Path not found or not a directory: {training_path}{C_END}")
-        if not worksheets_path.is_dir():
-             print(f"{C_RED}[ERROR]   -> Path not found or not a directory: {worksheets_path}{C_END}")
         return
-        
-    temp_dir.mkdir(exist_ok=True)
 
     training_pdf_paths = list(training_path.glob("*.pdf"))
+    training_files = []
     
-    ### DEBUG ###
-    print(f"{C_BLUE}[DEBUG] Found {len(training_pdf_paths)} PDF(s) in the training folder.{C_END}")
-    for pdf in training_pdf_paths:
-        print(f"{C_BLUE}[DEBUG]   -> Found: {pdf.name}{C_END}")
-    ### END DEBUG ###
-
-    # --- Phase 1: Cumulative Session and Training File Management ---
-    try:
-        training_files = manage_training_files(training_pdf_paths)
+    # --- Session Management Logic ---
+    training_files = load_session()
+    if training_files is None:
+        # --- Phase 1: Uploading Training Material ---
+        print(f"\n{C_BLUE}{C_BOLD}--- Phase 1: Uploading New Training Material ---{C_END}")
         if not training_pdf_paths:
-            print(f"{C_YELLOW}[WARNING] No training PDFs found in {args.training_folder}. The AI will use its general knowledge.{C_END}")
-        elif not training_files:
-             print(f"{C_RED}[ERROR] No training files were successfully uploaded or verified. Aborting.{C_END}")
-             shutil.rmtree(temp_dir)
-             return
-    except Exception as e:
-        print(f"{C_RED}[FATAL ERROR] An exception occurred during training file management: {e}{C_END}") ### DEBUG ###
-        shutil.rmtree(temp_dir)
-        return
+            print(f"{C_YELLOW}[WARNING] No training PDFs found. The AI will use its general knowledge.{C_END}")
+        else:
+            try:
+                training_files = upload_files_with_retry(training_pdf_paths)
+                print(f"{C_GREEN}[+] Successfully uploaded {len(training_files)} new training file(s).{C_END}")
+                save_session(training_pdf_paths, training_files)
+            except Exception as e:
+                print(f"{C_RED}[FATAL] Could not upload training files. Aborting. Error: {e}{C_END}")
+                return
 
     print(f"\n{C_BLUE}{C_BOLD}--- Phase 2: Processing Worksheets in Parallel (max {args.max_workers} at a time) ---{C_END}")
     worksheet_pdf_paths = list(worksheets_path.glob("*.pdf"))
     total_worksheets = len(worksheet_pdf_paths)
-    
-    ### DEBUG ###
-    print(f"{C_BLUE}[DEBUG] Found {len(worksheet_pdf_paths)} PDF(s) in the worksheets folder.{C_END}")
-    for pdf in worksheet_pdf_paths:
-        print(f"{C_BLUE}[DEBUG]   -> Found: {pdf.name}{C_END}")
-    ### END DEBUG ###
 
     if not worksheet_pdf_paths:
-        print("No worksheet PDFs found to process. Exiting.") ### DEBUG: More explicit message ###
-        shutil.rmtree(temp_dir)
+        print("No worksheet PDFs found to process.")
         return
 
     # Use the gemini-2.5-pro model
-    model = genai.GenerativeModel('models/gemini-2.5-pro')
+    model = genai.GenerativeModel('gemini-2.5-pro')
     
     processing_times = []
     success_count = 0
@@ -673,11 +484,11 @@ def main():
     failed_count = 0
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
-        future_to_ws = {executor.submit(process_single_worksheet, ws_path, training_files, model, temp_dir): ws_path for ws_path in worksheet_pdf_paths}
+        future_to_ws = {executor.submit(process_single_worksheet, ws_path, training_files, model): ws_path for ws_path in worksheet_pdf_paths}
 
         for i, future in enumerate(concurrent.futures.as_completed(future_to_ws)):
             ws_path = future_to_ws[future]
-            print(f"\n[{i+1}/{total_worksheets}] Finalizing result for {C_BOLD}{ws_path.name}{C_END}...")
+            print(f"[{i+1}/{total_worksheets}] Processing result for {C_BOLD}{ws_path.name}{C_END}...")
             try:
                 status, ws_name, result = future.result()
                 if status == 'success':
@@ -695,11 +506,6 @@ def main():
                 failed_count += 1
                 print(f"  -> {C_RED}[ERROR]   {C_BOLD}{ws_path.name}{C_END} generated an unexpected exception: {exc}")
 
-    # Clean up the main temporary directory
-    if temp_dir.exists():
-        print(f"{C_BLUE}[DEBUG] Cleaning up temporary directory: {temp_dir}{C_END}") ### DEBUG ###
-        shutil.rmtree(temp_dir)
-
     script_end_time = time.time()
     total_duration = script_end_time - script_start_time
 
@@ -714,7 +520,6 @@ def main():
         print(f"Average time per processed worksheet: {format_time(avg_time)}")
         
     print(f"{C_BOLD}Total execution time: {format_time(total_duration)}{C_END}")
-    print(f"{C_BLUE}{C_BOLD}[DEBUG] Script finished.{C_END}") ### DEBUG ###
 
 if __name__ == "__main__":
     main()
