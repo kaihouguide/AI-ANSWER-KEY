@@ -6,9 +6,9 @@ from dotenv import load_dotenv
 import time
 import concurrent.futures
 import json
-import pypdf # <-- New import for PDF splitting
-import tempfile # <-- New import for temporary directories
-from typing import List, Dict
+import pypdf
+import tempfile
+from typing import List
 
 # --- ANSI Color Codes for Rich Console Output ---
 C_GREEN = '\033[92m'
@@ -34,7 +34,7 @@ def format_time(seconds):
 def get_system_prompt():
     """
     Generates the initial system prompt that sets the context for the entire conversational task.
-    The HTML template now includes a placeholder for iterative content injection.
+    The HTML template is simplified as structural insertion is now used.
     """
     prompt = f"""
 You are a premier expert in mathematics and physics, tasked with creating a professional, textbook-quality HTML answer key from a provided worksheet. Your output must be flawless in its accuracy, pedagogy, and visual presentation. You will be given the worksheet page by page.
@@ -115,7 +115,6 @@ You MUST IGNORE any pre-existing answers in the provided files. Generate all sol
 <body>
 <div class="container">
     <h2>Answer Key for {{WORKSHEET_NAME}}</h2>
-    <!-- AI GENERATED CONTENT GOES HERE. -->
 </div>
 </body>
 </html>
@@ -125,7 +124,7 @@ You MUST IGNORE any pre-existing answers in the provided files. Generate all sol
 def get_first_page_prompt(worksheet_name):
     """Generates the user prompt for the first page."""
     return (
-        "This is the first page of the exam '{worksheet_name}'. "
+        f"This is the first page of the exam '{worksheet_name}'. "
         "Please start solving the problems on this page. "
         "Generate the full HTML document based on the system instructions, replacing '{{WORKSHEET_NAME}}' with the actual worksheet name."
     )
@@ -138,10 +137,6 @@ def get_next_page_prompt():
         "Please solve the problems on this new page and **APPEND** only the new HTML content for these problems. "
         "**DO NOT** repeat the <!DOCTYPE>, <head>, <style>, or opening <body> tags. Start directly with the content for the new problems (e.g., `<hr><h3>...`)."
     )
-
-# ===============================================================
-# END: MODIFIED PROMPT FUNCTIONS
-# ===============================================================
 
 def configure_ai():
     """Loads API key from .env file and configures the Generative AI client."""
@@ -239,7 +234,6 @@ def process_single_worksheet(ws_path, training_files, model):
                     message_parts = [prompt, page_file]
                 else:
                     prompt = get_next_page_prompt()
-                    # Provide previous context to ensure continuity
                     message_parts = [prompt, accumulated_html, page_file]
                 
                 try:
@@ -250,27 +244,26 @@ def process_single_worksheet(ws_path, training_files, model):
                 except Exception as api_error:
                     return 'failed', ws_name, f"API Error on page {i+1}: {api_error}"
                 
-                # Clean up markdown code block fences
                 if page_html_content.startswith("```html"):
                     page_html_content = page_html_content.removeprefix("```html").strip()
                 if page_html_content.endswith("```"):
                     page_html_content = page_html_content.removesuffix("```").strip()
 
                 if i == 0:
-                    # The first response should be the full document
                     if "<!DOCTYPE html>" not in page_html_content or "</body>" not in page_html_content:
                         return 'failed', ws_name, f"Model did not produce a valid full HTML document on the first page. Snippet: {page_html_content[:500]}"
                     accumulated_html = page_html_content.replace('{{WORKSHEET_NAME}}', ws_name)
                 else:
-                    # For subsequent pages, insert the new content into the placeholder
-                    placeholder = '<!-- AI GENERATED CONTENT GOES HERE. -->'
-                    if placeholder not in accumulated_html:
-                         return 'failed', ws_name, "Internal error: HTML placeholder comment was lost during generation."
-                    accumulated_html = accumulated_html.replace(placeholder, page_html_content + '\n' + placeholder)
+                    insertion_point = '</div>\n</body>'
+                    if insertion_point not in accumulated_html:
+                        insertion_point = '</div></body>'
+                        if insertion_point not in accumulated_html:
+                            return 'failed', ws_name, f"Structural error: Could not find the insertion point ('</div></body>') in the HTML generated so far."
+                    
+                    replacement_chunk = page_html_content + '\n' + insertion_point
+                    accumulated_html = accumulated_html.replace(insertion_point, replacement_chunk)
 
-        # Final cleanup of the placeholder comment
-        final_html = accumulated_html.replace('<!-- AI GENERATED CONTENT GOES HERE. -->', '').strip()
-        output_path.write_text(final_html, encoding='utf-8')
+        output_path.write_text(accumulated_html, encoding='utf-8')
         
         item_duration = time.time() - item_start_time
         return 'success', ws_name, item_duration
@@ -303,7 +296,6 @@ def main():
         print(f"{C_RED}[ERROR] One or both provided paths are not valid directories.{C_END}")
         return
 
-    # --- Phase 1: Intelligent File Upload Management (for training files) ---
     print(f"\n{C_BLUE}{C_BOLD}--- Phase 1: Managing Training Material ---{C_END}")
     
     training_pdf_paths = list(training_path.glob("*.pdf"))
@@ -358,13 +350,13 @@ def main():
         else:
             training_files = reused_files
 
-    # --- Phase 2: Processing Worksheets ---
     print(f"\n{C_BLUE}{C_BOLD}--- Phase 2: Processing Worksheets in Parallel (max {args.max_workers} at a time) ---{C_END}")
     worksheet_pdf_paths = list(worksheets_path.glob("*.pdf"))
     if not worksheet_pdf_paths:
         print("No worksheet PDFs found to process.")
         return
 
+    # Corrected Model Name as per user's image
     model = genai.GenerativeModel('gemini-2.5-pro')
     
     processing_times, success_count, skipped_count, failed_count = [], 0, 0, 0
