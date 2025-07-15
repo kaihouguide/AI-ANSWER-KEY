@@ -70,7 +70,7 @@ python process_pdfs.py --training-folder "./training_materials" --worksheets-fol
 
 *   `--training-folder` **(Required)**: Path to the folder with reference PDFs.
 *   `--worksheets-folder` **(Required)**: Path to the folder with worksheets to be solved.
-*   `--max-workers` (Optional): Number of worksheets to process in parallel. Defaults to `5`.
+*   `--max-workers` (Optional): Number of worksheets to process in parallel. Defaults to `1`. but it is changable
 
 **Example with all arguments:**
 ```bash
