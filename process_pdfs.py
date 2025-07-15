@@ -267,20 +267,39 @@ def process_single_worksheet(ws_path, training_files, model):
                 page_html_content = page_html_content.removeprefix("```html").strip()
             if page_html_content.endswith("```"):
                 page_html_content = page_html_content.removesuffix("```").strip()
+            
+            # ===============================================================
+            # START: FIX FOR MATHJAX RENDERING
+            # ===============================================================
+            # The AI sometimes incorrectly escapes the closing bracket for MathJax.
+            # We replace any instance of `\\]` with the correct `\]`.
+            page_html_content = page_html_content.replace('\\]', '\\]')
+            # ===============================================================
+            # END: FIX FOR MATHJAX RENDERING
+            # ===============================================================
 
             if i == 0:
                 if "<!DOCTYPE html>" not in page_html_content or "</body>" not in page_html_content:
                     return 'failed', ws_name, f"Model did not produce a valid full HTML document on the first page. Snippet: {page_html_content[:500]}"
                 accumulated_html = page_html_content.replace('{{WORKSHEET_NAME}}', ws_name)
             else:
-                insertion_point = '</div>\n</body>'
-                if insertion_point not in accumulated_html:
-                    insertion_point = '</div></body>'
-                    if insertion_point not in accumulated_html:
-                        return 'failed', ws_name, f"Structural error: Could not find the insertion point ('</div></body>') in the HTML generated so far."
+                insertion_points = [
+                    '</div>\n</body>',
+                    '</div></body>',
+                    '</body>'
+                ]
                 
-                replacement_chunk = page_html_content + '\n' + insertion_point
-                accumulated_html = accumulated_html.replace(insertion_point, replacement_chunk)
+                found_point = None
+                for point in insertion_points:
+                    if point in accumulated_html:
+                        found_point = point
+                        break
+                
+                if found_point:
+                    replacement_chunk = page_html_content + '\n' + found_point
+                    accumulated_html = accumulated_html.replace(found_point, replacement_chunk, 1)
+                else:
+                    return 'failed', ws_name, f"Structural error: Could not find a suitable insertion point (tried {insertion_points}) in the HTML generated so far."
 
         output_path.write_text(accumulated_html, encoding='utf-8')
         
@@ -304,7 +323,7 @@ def main():
     )
     parser.add_argument("--training-folder", type=str, required=True, help="Path to the folder with 'training' or 'textbook' PDFs.")
     parser.add_argument("--worksheets-folder", type=str, required=True, help="Path to the folder with 'worksheet' PDFs to be solved.")
-    parser.add_argument("--max-workers", type=int, default=1, help="Maximum number of worksheets to process in parallel.")
+    parser.add_argument("--max-workers", type=int, default=5, help="Maximum number of worksheets to process in parallel.")
     args = parser.parse_args()
 
     try:
@@ -380,7 +399,6 @@ def main():
         print("No worksheet PDFs found to process.")
         return
 
-    # --- MODEL NAME CORRECTED AS PER YOUR IMAGE AND ORIGINAL SCRIPT ---
     model = genai.GenerativeModel('gemini-2.5-pro')
     
     processing_times, success_count, skipped_count, failed_count = [], 0, 0, 0
