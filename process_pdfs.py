@@ -304,7 +304,7 @@ def main():
     )
     parser.add_argument("--training-folder", type=str, required=True, help="Path to the folder with 'training' or 'textbook' PDFs.")
     parser.add_argument("--worksheets-folder", type=str, required=True, help="Path to the folder with 'worksheet' PDFs to be solved.")
-    parser.add_argument("--max-workers", type=int, default=5, help="Maximum number of worksheets to process in parallel.")
+    parser.add_argument("--max-workers", type=int, default=1, help="Maximum number of worksheets to process in parallel.")
     args = parser.parse_args()
 
     try:
