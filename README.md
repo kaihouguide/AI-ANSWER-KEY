@@ -76,5 +76,5 @@ python process_pdfs.py --training-folder "./training_materials" --worksheets-fol
 ```bash
 python process_pdfs.py --training-folder "./training_materials" --worksheets-folder "./worksheets_to_solve" --max-workers 1
 ```
-###THE LESS CONCURRENT THE BETTER THE RESULTS KEEP MAX WORKERS AT 1 AND WAIT  
+### THE LESS CONCURRENT THE BETTER THE RESULTS KEEP MAX WORKERS AT 1 AND WAIT  
 The script will show its progress in the terminal. The final `.key.html` answer keys will be saved in the `worksheets_to_solve` folder.
