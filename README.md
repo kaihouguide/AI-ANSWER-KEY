@@ -42,7 +42,7 @@ pip install google-generativeai python-dotenv pypdf
 In the project folder, create a file named `.env` and add your API key to it:
 ```
 # .env file content
-GOOGLE_API_KEY=YOUR_API_KEY_HERE
+GOOGLE_API_KEY="KEY HERE"
 ```
 
 ### 3. Folder Structure
