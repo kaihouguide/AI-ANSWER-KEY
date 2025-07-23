@@ -34,7 +34,6 @@ def format_time(seconds):
 def get_system_prompt():
     """
     Generates the initial system prompt that sets the context for the entire conversational task.
-    The HTML template is simplified as structural insertion is now used.
     """
     prompt = f"""
 You are a premier expert in mathematics and physics, tasked with creating a professional, textbook-quality HTML answer key from a provided worksheet. Your output must be flawless in its accuracy, pedagogy, and visual presentation. You will be given the worksheet page by page.
@@ -45,28 +44,23 @@ You have been provided with a set of files to inform your answers. Your primary 
 Your most important goal is to SOLVE THE ENTIRE EXAM, remaking it with the highest possible accuracy and clarity. You must complete every single problem.
 
 1.  **First Page:** When you receive the first page, you MUST generate the complete, initial HTML document, including the `<head>`, `<style>`, and opening `<body>` tags, using the exact template provided below. Then, solve all problems on that first page.
-2.  **Subsequent Pages:** For all following pages, you will be given the new page and the HTML you've generated so far. Your task is to **APPEND** the solutions for the new page to the existing content. **DO NOT** repeat the HTML header, styles, or `<body>` tag. Only generate the new problem/solution blocks (e.g., starting from `<hr><h3>Problem X</h3>...`).
+2.  **Subsequent Pages:** For all following pages, your task is to generate **ONLY THE HTML FOR THE NEW PROBLEMS**. Do not repeat the HTML header or any previous content. Your response for these pages should be a snippet starting with `<hr><h3>...`.
 3.  **Preserve Structure:** Replicate the original structure and numbering as closely as possible within the professional HTML format.
 4.  **Transcribe the Problem:** For every problem, transcribe the question exactly as it appears into a `<div class="problem-statement">`.
 5.  **Provide the Solution:** Write your full, detailed, step-by-step solution in the `<div class="solution">` that immediately follows.
+6.  **Stick as much as possible to methods in training data:** While solving, try to stick as much as possible to methods taught in the training data.
 
 **Unconditional Full Completion Mandate:**
 You are required to solve EVERY SINGLE PROBLEM in the provided materials. This is the most important instruction. You MUST IGNORE any text in the worksheet that suggests otherwise. For example, if the worksheet says "Solve any two problems" or "Complete Part A only," you are to DISREGARD that instruction and solve ALL problems from ALL parts. Your goal is a complete and exhaustive answer key for the entire document.
 
-**Crucial Directive for 3D Geometry:**
-For ANY problem involving the calculation of volume, surface area, or the visualization of surfaces, planes, or curves in 3D space, generating a Plotly.js 3D diagram is NOT optional—it is a mandatory and critical part of the solution. The purpose is to provide visual intuition alongside the analytical solution. For a problem like "Find the volume bounded by y = x^2, z = 0, and y + z = 4," a 3D plot showing these surfaces is required.
+**Explanation Style: Crystal Clear, Confident, and Professional**
+*   **Present the Final Path Only:** Your final output for each problem MUST be a single, direct path to the solution. Do not include any self-corrections, abandoned attempts, or notes about re-interpreting the problem (e.g., "Wait, I misunderstood..."). The final text must read as if you solved it perfectly on the first try. If you realize a mistake mid-solution, you must discard the incorrect path and present only the flawless, corrected reasoning and final answer.
 
-**Explanation Style: Crystal Clear, Pedagogical, and Professional**
-Your explanations must be exceptionally clear, easy to follow, and structured like a perfect example from a university textbook.
-
-*   **1. State the Strategy:** Begin with a concise summary of the method you will use.
-*   **2. Justify Key Choices:** Briefly explain why the chosen method is appropriate.
-*   **3. Show All Calculation Steps:** Meticulously show every step of the calculation.
-*   **4. Guide the Reader:** Use short, declarative sentences to introduce each major part of the calculation.
-*   **5. Define All Variables:** Any new variables or coordinate systems must be clearly defined before use.
-
-**Visuals & Diagrams: Textbook Quality is Mandatory (D3.js for 2D, Plotly.js for 3D)**
-Follow all previous instructions regarding the high quality and mandatory inclusion of D3.js and Plotly.js diagrams. The setup steps (defining scales, data arrays, layouts, etc.) remain critical.
+**Visuals & Diagrams: Textbook Quality is Mandatory**
+*   **3D Geometry (Plotly.js):** For ANY problem involving the calculation of volume, surface area, or the visualization of surfaces, planes, or curves in 3D space, generating a Plotly.js 3D diagram is NOT optional—it is a mandatory and critical part of the solution.
+*   **Statics & Dynamics (D3.js):** For any problem involving forces (e.g., statics, dynamics), you MUST generate a ***simplified***, clear, and accurate Free-Body Diagram (FBD) using D3.js. The diagram must isolate the object and show all applied forces, reaction forces, and moments as clearly labeled vectors. This is a non-optional, critical component of the solution.
+    **YOU MUST GENERATE SAID DIAGRAMS FOR ALL NEEDED STEPS LIKE THE TANGENT NORMAL DIAGRAMS AND POLAR DIAGRAMS AND OTHER NEEDED TO SOLVE DIAGRAMS***   
+*   **Other 2D Diagrams (D3.js):** Use D3.js for any other necessary 2D plots or diagrams to enhance explanations.
 
 **INDEPENDENT PROBLEM SOLVING:**
 You MUST IGNORE any pre-existing answers in the provided files. Generate all solutions from scratch.
@@ -107,9 +101,6 @@ You MUST IGNORE any pre-existing answers in the provided files. Generate all sol
         .diagram-container {{ text-align: center; margin: 40px auto; padding: 25px; background-color: #fff; border: 1px solid var(--border-color); border-radius: 8px; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.04)); }}
         .d3-chart {{ margin: auto; width: 100%; max-width: 650px; }}
         .diagram-caption {{ font-size: 0.95em; font-style: italic; color: #666; margin-top: 20px; }}
-        .d3-chart text, .axis text {{ font-family: var(--font-sans); font-size: 12px; }}
-        .grid .tick {{ stroke: lightgray; opacity: 0.7; }}
-        .grid path {{ stroke-width: 0; }}
         hr {{ border: 0; height: 1px; background-color: var(--border-color); margin: 70px 0; }}
         code {{ font-family: var(--font-mono); background-color: var(--accent-bg-dark); padding: 3px 6px; border-radius: 4px; font-size: 0.95em; }}
         .final-answer {{ font-weight: 700; color: var(--success-color); background-color: var(--success-bg); padding: 4px 8px; border-radius: 6px; display: inline-block; border: 1px solid #a5d6a7; }}
@@ -136,10 +127,30 @@ def get_next_page_prompt():
     """Generates the user prompt for subsequent pages."""
     return (
         "Excellent work. Here is the next page of the exam. "
-        "Below is also the HTML content you have generated so far. "
-        "Please solve the problems on this new page and **APPEND** only the new HTML content for these problems. "
-        "**DO NOT** repeat the <!DOCTYPE>, <head>, <style>, or opening <body> tags. Start directly with the content for the new problems (e.g., `<hr><h3>...`)."
+        "Please solve the problems on this new page and generate **only the new HTML content** for these problems. "
+        "Your output must be an HTML snippet that starts directly with the content for the new problems (e.g., `<hr><h3>...`). "
+        "**DO NOT** output a full HTML document or repeat any previous content."
     )
+
+def get_snippet_review_prompt():
+    """Generates the prompt for reviewing an isolated HTML snippet before merging."""
+    return (
+        "You are now acting as a meticulous editor. Below is a snippet of HTML containing the solution for one or more problems. Your task is to review and refine this snippet.\n\n"
+        "1.  **Validate Structure and Requirements:** Ensure the snippet follows all structural and content rules (e.g., problem/solution divs, mandatory diagrams).\n\n"
+        "2.  **Refine Solution Presentation:** This is your most important task. Scrutinize the step-by-step solution. If it shows any signs of self-correction, abandoned attempts, or a non-linear path to the answer (e.g., phrasing like 'Wait, I should have...' or 'A better approach is...'), you MUST rewrite that entire solution within the snippet. The rewritten solution must present a single, direct, confident, and flawless path from the problem statement to the final answer.\n\n"
+        "Your final output MUST be the complete, corrected, and polished HTML snippet. Do not add any extra explanations or formatting like ```html."
+    )
+
+def get_full_document_review_prompt():
+    """Generates the prompt for the final validation and refinement step of a full HTML document."""
+    return (
+        "Excellent. The initial document has now been generated. You will now act as a final editor.\n\n"
+        "I am providing you with the complete HTML document. Your task is to review it meticulously and perform two actions:\n\n"
+        "1.  **Validate Against All Original Requirements:** Read the entire HTML file and ensure it meets every single one of the initial system instructions.\n\n"
+        "2.  **Refine Solutions for a Flawless Presentation:** Scrutinize the step-by-step solutions for every problem. If you find any solution that shows signs of self-correction or a non-linear path, you MUST rewrite that entire solution to be direct and confident.\n\n"
+        "Your final output MUST be the complete, corrected, and polished HTML document. Provide the full, final HTML code."
+    )
+
 
 def configure_ai():
     """Loads API key from .env file and configures the Generative AI client."""
@@ -174,7 +185,6 @@ def upload_files_with_retry(file_paths, max_retries=3):
             except Exception as e:
                 print(f" {C_RED}[!] Attempt {attempt + 1} failed for {path.name}: {e}{C_END}")
                 if attempt + 1 == max_retries:
-                    print(f" {C_RED}[!] Failed to upload {path.name} after {max_retries} attempts.{C_END}")
                     raise
                 time.sleep(2 ** attempt)
     return uploaded_files
@@ -200,8 +210,8 @@ def split_pdf(pdf_path: Path, output_dir: Path) -> List[Path]:
 
 def process_single_worksheet(ws_path, training_files, model):
     """
-    Processes a single worksheet PDF by splitting it into pages and feeding them
-    iteratively to the AI model to build a single, cohesive HTML answer key.
+    Processes a worksheet using a "Generate -> Review -> Merge" workflow.
+    Saves the HTML file progressively after each page is processed.
     """
     item_start_time = time.time()
     ws_name = ws_path.name
@@ -210,30 +220,24 @@ def process_single_worksheet(ws_path, training_files, model):
     if output_path.exists():
         return 'skipped', ws_name, "Output file already exists."
 
+    temp_dir_manager = None
     try:
+        # PDF validation and splitting
         try:
             reader = pypdf.PdfReader(ws_path)
             num_pages = len(reader.pages)
-            if num_pages == 0:
-                return 'failed', ws_name, "Worksheet PDF is empty."
-        except Exception as e:
-            return 'failed', ws_name, f"Could not read PDF file: {e}"
+            if num_pages == 0: return 'failed', ws_name, "Worksheet PDF is empty."
+        except Exception as e: return 'failed', ws_name, f"Could not read PDF file: {e}"
 
-        page_paths = []
-        temp_dir_manager = None
-
-        if num_pages == 1:
-            print(f"[*] Worksheet '{ws_name}' has one page. Processing directly.")
-            page_paths = [ws_path]
-        else:
+        page_paths = [ws_path] if num_pages == 1 else []
+        if num_pages > 1:
             temp_dir_manager = tempfile.TemporaryDirectory()
-            temp_path = Path(temp_dir_manager.name)
-            page_paths = split_pdf(ws_path, temp_path)
+            page_paths = split_pdf(ws_path, Path(temp_dir_manager.name))
             if not page_paths:
-                if temp_dir_manager:
-                    temp_dir_manager.cleanup()
+                if temp_dir_manager: temp_dir_manager.cleanup()
                 return 'failed', ws_name, "PDF could not be split."
 
+        # Model and chat setup
         system_prompt = get_system_prompt()
         chat = model.start_chat(history=[
             {'role': 'user', 'parts': [system_prompt] + training_files},
@@ -245,85 +249,81 @@ def process_single_worksheet(ws_path, training_files, model):
 
         for i, page_path in enumerate(page_paths):
             print(f"[*] Processing page {C_YELLOW}{i+1}/{total_pages}{C_END} for {C_BOLD}{ws_name}{C_END}...")
-
-            page_file = upload_files_with_retry([page_path])[0]
+            page_file = upload_files_with_retry([page_path])
 
             if i == 0:
+                # --- FIRST PAGE: Generate and then Review Full Document ---
                 prompt = get_first_page_prompt(ws_name)
-                message_parts = [prompt, page_file]
+                response = chat.send_message([prompt] + page_file)
+                
+                if not response.parts: return 'failed', ws_name, "Model returned empty response on page 1 (generation)."
+                initial_html = response.text.strip().removeprefix("```html").removesuffix("```").strip()
+
+                if "<!DOCTYPE html>" not in initial_html: return 'failed', ws_name, "Model did not produce a valid HTML doc on page 1."
+
+                print(f"  -> Reviewing initial document...")
+                review_prompt = get_full_document_review_prompt()
+                review_response = chat.send_message([review_prompt, initial_html])
+
+                if not review_response.parts:
+                     return 'failed', ws_name, "Model returned empty response on page 1 (review)."
+                
+                reviewed_html = review_response.text.strip().removeprefix("```html").removesuffix("```").strip()
+                if "<!DOCTYPE html>" not in reviewed_html:
+                    return 'failed', ws_name, "Review step for page 1 did not produce a valid HTML document."
+                
+                accumulated_html = reviewed_html.replace('{{WORKSHEET_NAME}}', ws_name)
+                # **NEW**: Save after first page is processed
+                output_path.write_text(accumulated_html, encoding='utf-8')
+                print(f"  -> {C_GREEN}Initial document review complete. Saved initial version to {output_path.name}{C_END}")
+
             else:
+                # --- SUBSEQUENT PAGES: Generate Snippet -> Review Snippet -> Merge -> Save ---
                 prompt = get_next_page_prompt()
-                message_parts = [prompt, accumulated_html, page_file]
-            
-            try:
-                response = chat.send_message(message_parts)
-                if not response.parts:
-                    return 'failed', ws_name, f"Model returned an empty response on page {i+1}. This may be due to a safety filter."
-                page_html_content = response.text.strip()
-            except Exception as api_error:
-                return 'failed', ws_name, f"API Error on page {i+1}: {api_error}"
-            
-            if page_html_content.startswith("```html"):
-                page_html_content = page_html_content.removeprefix("```html").strip()
-            if page_html_content.endswith("```"):
-                page_html_content = page_html_content.removesuffix("```").strip()
-            
-            # ===============================================================
-            # START: FIX FOR MATHJAX RENDERING
-            # ===============================================================
-            # The AI sometimes incorrectly escapes the closing bracket for MathJax.
-            # We replace any instance of `\\]` with the correct `\]`.
-            page_html_content = page_html_content.replace('\\]', '\\]')
-            # ===============================================================
-            # END: FIX FOR MATHJAX RENDERING
-            # ===============================================================
+                response = chat.send_message([prompt] + page_file)
 
-            if i == 0:
-                if "<!DOCTYPE html>" not in page_html_content or "</body>" not in page_html_content:
-                    return 'failed', ws_name, f"Model did not produce a valid full HTML document on the first page. Snippet: {page_html_content[:500]}"
-                accumulated_html = page_html_content.replace('{{WORKSHEET_NAME}}', ws_name)
-            else:
-                insertion_points = [
-                    '</div>\n</body>',
-                    '</div></body>',
-                    '</body>'
-                ]
+                if not response.parts: return 'failed', ws_name, f"Model returned empty response on page {i+1} (snippet generation)."
+                raw_snippet = response.text.strip().removeprefix("```html").removesuffix("```").strip()
+
+                print(f"  -> Reviewing snippet for page {i+1}...")
+                review_prompt = get_snippet_review_prompt()
+                review_response = chat.send_message([review_prompt, raw_snippet])
+
+                if not review_response.parts:
+                    return 'failed', ws_name, f"Model returned empty response on page {i+1} (snippet review)."
                 
-                found_point = None
-                for point in insertion_points:
-                    if point in accumulated_html:
-                        found_point = point
-                        break
+                refined_snippet = review_response.text.strip().removeprefix("```html").removesuffix("```").strip()
                 
+                insertion_points = ['</div>\n</body>', '</div></body>', '</body>']
+                found_point = next((p for p in insertion_points if p in accumulated_html), None)
+
                 if found_point:
-                    replacement_chunk = page_html_content + '\n' + found_point
+                    replacement_chunk = refined_snippet + '\n' + found_point
                     accumulated_html = accumulated_html.replace(found_point, replacement_chunk, 1)
+                    # **NEW**: Overwrite the file with the updated content
+                    output_path.write_text(accumulated_html, encoding='utf-8')
+                    print(f"  -> {C_GREEN}Snippet for page {i+1} merged. Updated {output_path.name}.{C_END}")
                 else:
-                    return 'failed', ws_name, f"Structural error: Could not find a suitable insertion point (tried {insertion_points}) in the HTML generated so far."
-
-        output_path.write_text(accumulated_html, encoding='utf-8')
+                    return 'failed', ws_name, "Structural error: Could not find insertion point to merge refined snippet."
         
-        if temp_dir_manager:
-            temp_dir_manager.cleanup()
-            
+        if temp_dir_manager: temp_dir_manager.cleanup()
         item_duration = time.time() - item_start_time
         return 'success', ws_name, item_duration
 
     except Exception as e:
-        if 'temp_dir_manager' in locals() and temp_dir_manager:
-            temp_dir_manager.cleanup()
+        if temp_dir_manager: temp_dir_manager.cleanup()
         return 'failed', ws_name, str(e)
 
 
 def main():
     script_start_time = time.time()
     parser = argparse.ArgumentParser(
-        description="Generate HTML answer keys for worksheets by processing PDFs page-by-page using parallel processing.",
+        description="Generate HTML answer keys from PDFs using a parallel, page-by-page, review-before-merge workflow.",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument("--training-folder", type=str, required=True, help="Path to the folder with 'training' or 'textbook' PDFs.")
-    parser.add_argument("--worksheets-folder", type=str, required=True, help="Path to the folder with 'worksheet' PDFs to be solved.")
-    parser.add_argument("--max-workers", type=int, default=5, help="Maximum number of worksheets to process in parallel.")
+    parser.add_argument("--training-folder", type=str, required=True, help="Path to folder with 'training' PDFs.")
+    parser.add_argument("--worksheets-folder", type=str, required=True, help="Path to folder with 'worksheet' PDFs.")
+    parser.add_argument("--max-workers", type=int, default=5, help="Max number of worksheets to process in parallel.")
     args = parser.parse_args()
 
     try:
@@ -340,13 +340,13 @@ def main():
         return
 
     print(f"\n{C_BLUE}{C_BOLD}--- Phase 1: Managing Training Material ---{C_END}")
-    
     training_pdf_paths = list(training_path.glob("*.pdf"))
     training_files = []
 
     if not training_pdf_paths:
         print(f"{C_YELLOW}[WARNING] No training PDFs found. The AI will use its general knowledge.{C_END}")
     else:
+        # Session handling to reuse uploaded files
         session_files = {}
         if Path(SESSION_FILE).exists():
             try:
@@ -354,46 +354,40 @@ def main():
                     session_data = json.load(f)
                     session_files = {item['local_name']: item['server_id'] for item in session_data}
             except (json.JSONDecodeError, IOError) as e:
-                print(f"{C_YELLOW}[WARNING] Could not read session file '{SESSION_FILE}': {e}. Treating all files as new.{C_END}")
-
+                print(f"{C_YELLOW}[WARNING] Could not read session file: {e}. Re-uploading all.{C_END}")
+        
         current_filenames = {p.name for p in training_pdf_paths}
         session_filenames = set(session_files.keys())
-        new_file_names = current_filenames - session_filenames
-        existing_file_names = current_filenames.intersection(session_filenames)
+        paths_to_upload = [p for p in training_pdf_paths if p.name not in session_filenames]
         
-        paths_to_upload = [p for p in training_pdf_paths if p.name in new_file_names]
         reused_files = []
-        
-        if existing_file_names:
-            print(f"[*] Found {len(existing_file_names)} existing file(s) in session. Verifying...")
-            verified_count = 0
-            for name in sorted(list(existing_file_names)):
-                server_id = session_files[name]
+        if session_filenames:
+            verified_names = current_filenames.intersection(session_filenames)
+            print(f"[*] Verifying {len(verified_names)} file(s) from session...")
+            for name in sorted(list(verified_names)):
                 try:
-                    reused_file = genai.get_file(name=server_id)
+                    reused_file = genai.get_file(name=session_files[name])
                     reused_files.append(reused_file)
-                    verified_count += 1
                 except Exception:
                     paths_to_upload.append(training_path / name)
-            if verified_count > 0:
-                print(f"  -> {C_GREEN}Successfully verified and reused {verified_count} file(s).{C_END}")
+            if reused_files:
+                print(f"  -> {C_GREEN}Successfully verified and reused {len(reused_files)} file(s).{C_END}")
 
         if paths_to_upload:
-            print(f"[*] Found {len(paths_to_upload)} new or unverified file(s) to upload.")
+            print(f"[*] Uploading {len(paths_to_upload)} new or unverified file(s)...")
             try:
                 newly_uploaded_files = upload_files_with_retry(paths_to_upload)
                 training_files = reused_files + newly_uploaded_files
                 path_map = {p.name: p for p in training_pdf_paths}
-                final_local_paths = [path_map[f.display_name] for f in training_files if f.display_name in path_map]
+                final_local_paths = [path_map[f.display_name] for f in training_files]
                 save_session(final_local_paths, training_files)
-                print(f"  -> {C_GREEN}Successfully uploaded {len(newly_uploaded_files)} and updated session.{C_END}")
             except Exception as e:
                 print(f"{C_RED}[FATAL] Could not upload training files. Aborting. Error: {e}{C_END}")
                 return
         else:
             training_files = reused_files
 
-    print(f"\n{C_BLUE}{C_BOLD}--- Phase 2: Processing Worksheets in Parallel (max {args.max_workers} at a time) ---{C_END}")
+    print(f"\n{C_BLUE}{C_BOLD}--- Phase 2: Processing Worksheets (max {args.max_workers} parallel) ---{C_END}")
     worksheet_pdf_paths = list(worksheets_path.glob("*.pdf"))
     if not worksheet_pdf_paths:
         print("No worksheet PDFs found to process.")
@@ -415,23 +409,23 @@ def main():
                 if status == 'success':
                     success_count += 1
                     processing_times.append(result)
-                    print(f"  -> {C_GREEN}[SUCCESS] {C_BOLD}{ws_name}{C_END} fully processed in {format_time(result)}.")
+                    print(f"  -> {C_GREEN}[SUCCESS] {ws_name} processed in {format_time(result)}.{C_END}")
                 elif status == 'skipped':
                     skipped_count += 1
-                    print(f"  -> {C_BLUE}[SKIPPED] {C_BOLD}{ws_name}{C_END}. Reason: {result}")
+                    print(f"  -> {C_BLUE}[SKIPPED] {ws_name}. Reason: {result}{C_END}")
                 elif status == 'failed':
                     failed_count += 1
-                    print(f"  -> {C_RED}[FAILED]  {C_BOLD}{ws_name}{C_END}. Reason: {result}")
+                    print(f"  -> {C_RED}[FAILED]  {ws_name}. Reason: {result}{C_END}")
             except Exception as exc:
                 failed_count += 1
-                print(f"  -> {C_RED}[ERROR]   {C_BOLD}{ws_path.name}{C_END} generated an unexpected exception: {exc}")
+                print(f"  -> {C_RED}[ERROR]   {ws_path.name} generated an exception: {exc}{C_END}")
 
     total_duration = time.time() - script_start_time
     print(f"\n{C_BLUE}{C_BOLD}{'-'*25} All Tasks Completed {'-'*25}{C_END}")
-    print(f"Summary for {total_worksheets} total worksheet(s) found:")
-    print(f"  - {C_GREEN}Successfully Processed: {success_count}{C_END}")
-    print(f"  - {C_BLUE}Skipped (already exists): {skipped_count}{C_END}")
-    print(f"  - {C_RED}Failed: {failed_count}{C_END}")
+    print(f"Summary for {total_worksheets} total worksheet(s):")
+    print(f"  - {C_GREEN}Success: {success_count}{C_END}")
+    print(f"  - {C_BLUE}Skipped: {skipped_count}{C_END}")
+    print(f"  - {C_RED}Failed:  {failed_count}{C_END}")
     
     if processing_times:
         avg_time = sum(processing_times) / len(processing_times)
