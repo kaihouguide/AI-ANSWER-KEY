@@ -77,5 +77,5 @@ python process_pdfs.py --training-folder "./training_materials" --worksheets-fol
 python process_pdfs.py --training-folder "./training_materials" --worksheets-folder "./worksheets_to_solve" --max-workers 1
 ```
 ### THE LESS CONCURRENT THE BETTER THE RESULTS KEEP MAX WORKERS AT 1 AND WAIT  
-* you can generate about 50 answer keys a day with 1 api key a day using 1 worker it takes about 2 and half hours with around 8 mins an answer key
+* you can generate about 15 answer keys a day with 1 api key a day using 1 worker it takes about 2 and half hours with around 8 mins an answer key
 * The script will show its progress in the terminal. The final `.key.html` answer keys will be saved in the `worksheets_to_solve` folder.
