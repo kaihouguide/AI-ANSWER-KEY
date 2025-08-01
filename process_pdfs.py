@@ -24,45 +24,84 @@ C_END = '\033[0m'
 SESSION_FILE = ".pdf_process_session.json"
 
 # ===============================================================
-# START: RATE LIMITING IMPLEMENTATION
+# START: MODIFICATION - TOKEN-AWARE RATE LIMITER
 # ===============================================================
-class APIRateLimiter:
+class APITokenRateLimiter:
     """
-    A thread-safe rate limiter to control the frequency of API calls.
-    This ensures that the script does not exceed the specified requests-per-minute quota.
+    A thread-safe rate limiter to control API calls based on both the
+    number of requests and the total number of tokens per minute.
     """
-    def __init__(self, max_requests, period_seconds):
-        self.max_requests = max_requests
+    def __init__(self, max_requests, max_tokens, period_seconds):
+        self.max_requests_per_period = max_requests
+        self.max_tokens_per_period = max_tokens
         self.period_seconds = period_seconds
-        self.request_timestamps = collections.deque()
+        # This deque stores tuples of (timestamp, token_count)
+        self.history = collections.deque()
         self.lock = threading.Lock()
 
-    def wait_for_slot(self):
+    def wait_for_slot(self, upcoming_token_count: int):
         """
-        Blocks until a slot is available for a new API request.
-        This method is thread-safe.
+        Blocks until a slot is available for a new API request, respecting
+        both request and token limits. This method is thread-safe.
         """
         with self.lock:
+            # First, a sanity check. If a single request is larger than the
+            # entire period's token quota, it can never be processed.
+            if upcoming_token_count > self.max_tokens_per_period:
+                # We raise an exception here because this is a non-recoverable
+                # scenario for this specific request. It must be broken down.
+                raise ValueError(
+                    f"Request with {upcoming_token_count} tokens exceeds the "
+                    f"per-minute limit of {self.max_tokens_per_period}. "
+                    "This request must be split into smaller parts."
+                )
+
             while True:
                 now = time.monotonic()
-                # Remove timestamps older than the specified period
-                while self.request_timestamps and self.request_timestamps[0] <= now - self.period_seconds:
-                    self.request_timestamps.popleft()
+                current_requests = 0
+                current_tokens = 0
 
-                if len(self.request_timestamps) < self.max_requests:
-                    self.request_timestamps.append(now)
-                    break
+                # Prune old history and calculate current window's usage
+                while self.history and self.history[0][0] <= now - self.period_seconds:
+                    self.history.popleft()
                 
-                # Calculate sleep time until the oldest request expires
-                sleep_time = self.request_timestamps[0] + self.period_seconds - now
-                print(f"{C_YELLOW}[RATE LIMIT] Quota of {self.max_requests} requests per {self.period_seconds}s reached. Pausing for {sleep_time:.1f} seconds...{C_END}")
+                # After pruning, what's left in the deque is the usage in the current window
+                current_requests = len(self.history)
+                current_tokens = sum(item[1] for item in self.history)
+
+                # Check if the new request can be accommodated
+                can_proceed = (
+                    current_requests < self.max_requests_per_period and
+                    (current_tokens + upcoming_token_count) <= self.max_tokens_per_period
+                )
+
+                if can_proceed:
+                    self.history.append((now, upcoming_token_count))
+                    break # Slot is available
+                
+                # If we can't proceed, calculate sleep time.
+                # We must wait until the oldest request expires from the window.
+                oldest_timestamp, oldest_tokens = self.history[0]
+                sleep_time = (oldest_timestamp + self.period_seconds) - now + 0.1 # Add small buffer
+                
+                # Provide a detailed reason for waiting
+                reason = "request limit" if current_requests >= self.max_requests_per_period else "token limit"
+                print(
+                    f"{C_YELLOW}[RATE LIMIT] {reason.capitalize()} reached. "
+                    f"Pausing for {sleep_time:.1f} seconds...{C_END}"
+                )
                 time.sleep(sleep_time)
 
-# Instantiate the rate limiter: 5 requests per 60 seconds, as per the user's requirement.
-# This single instance will be shared across all parallel processing threads.
-api_rate_limiter = APIRateLimiter(max_requests=5, period_seconds=60)
+# Instantiate the rate limiter with values for the Gemini 2.5 Pro Free Tier.
+# We use a slight buffer (240k tokens instead of 250k) for safety.
+# Limits: 5 requests/min, 250,000 tokens/min.
+api_rate_limiter = APITokenRateLimiter(
+    max_requests=5, 
+    max_tokens=240000, 
+    period_seconds=60
+)
 # ===============================================================
-# END: RATE LIMITING IMPLEMENTATION
+# END: MODIFICATION - TOKEN-AWARE RATE LIMITER
 # ===============================================================
 
 
@@ -74,7 +113,7 @@ def format_time(seconds):
     return f"{int(minutes)} min, {int(seconds)} sec"
 
 # ===============================================================
-# START: MODIFIED PROMPT & HTML TEMPLATE
+# NOTE: The prompts and HTML template remain unchanged.
 # ===============================================================
 def get_system_prompt():
     """
@@ -253,6 +292,9 @@ def split_pdf(pdf_path: Path, output_dir: Path) -> List[Path]:
         print(f"  -> {C_RED}Failed to split PDF: {e}{C_END}")
         raise
 
+# ===============================================================
+# START: MODIFICATION - INTEGRATING TOKEN-AWARE RATE LIMITING
+# ===============================================================
 def process_single_worksheet(ws_path, training_files, model):
     """
     Processes a worksheet using a "Generate -> Review -> Merge" workflow.
@@ -300,21 +342,26 @@ def process_single_worksheet(ws_path, training_files, model):
                 # --- FIRST PAGE: Generate and then Review Full Document ---
                 prompt = get_first_page_prompt(ws_name)
                 
-                # *** MODIFIED: Wait for API slot before sending message ***
-                api_rate_limiter.wait_for_slot()
-                response = chat.send_message([prompt] + page_file)
+                # --- Step 1: Generation ---
+                parts_for_generation = [prompt] + page_file
+                token_count_gen = model.count_tokens(parts_for_generation).total_tokens
+                print(f"  -> Generation request will use {token_count_gen} tokens.")
+                api_rate_limiter.wait_for_slot(token_count_gen)
+                response = chat.send_message(parts_for_generation)
                 
                 if not response.parts: return 'failed', ws_name, "Model returned empty response on page 1 (generation)."
                 initial_html = response.text.strip().removeprefix("```html").removesuffix("```").strip()
 
                 if "<!DOCTYPE html>" not in initial_html: return 'failed', ws_name, "Model did not produce a valid HTML doc on page 1."
 
+                # --- Step 2: Review ---
                 print(f"  -> Reviewing initial document...")
                 review_prompt = get_full_document_review_prompt()
-
-                # *** MODIFIED: Wait for API slot before sending message ***
-                api_rate_limiter.wait_for_slot()
-                review_response = chat.send_message([review_prompt, initial_html])
+                parts_for_review = [review_prompt, initial_html]
+                token_count_review = model.count_tokens(parts_for_review).total_tokens
+                print(f"  -> Review request will use {token_count_review} tokens.")
+                api_rate_limiter.wait_for_slot(token_count_review)
+                review_response = chat.send_message(parts_for_review)
 
                 if not review_response.parts:
                      return 'failed', ws_name, "Model returned empty response on page 1 (review)."
@@ -331,19 +378,24 @@ def process_single_worksheet(ws_path, training_files, model):
                 # --- SUBSEQUENT PAGES: Generate Snippet -> Review Snippet -> Merge -> Save ---
                 prompt = get_next_page_prompt()
                 
-                # *** MODIFIED: Wait for API slot before sending message ***
-                api_rate_limiter.wait_for_slot()
-                response = chat.send_message([prompt] + page_file)
+                # --- Step 1: Snippet Generation ---
+                parts_for_generation = [prompt] + page_file
+                token_count_gen = model.count_tokens(parts_for_generation).total_tokens
+                print(f"  -> Snippet generation request will use {token_count_gen} tokens.")
+                api_rate_limiter.wait_for_slot(token_count_gen)
+                response = chat.send_message(parts_for_generation)
 
                 if not response.parts: return 'failed', ws_name, f"Model returned empty response on page {i+1} (snippet generation)."
                 raw_snippet = response.text.strip().removeprefix("```html").removesuffix("```").strip()
 
+                # --- Step 2: Snippet Review ---
                 print(f"  -> Reviewing snippet for page {i+1}...")
                 review_prompt = get_snippet_review_prompt()
-                
-                # *** MODIFIED: Wait for API slot before sending message ***
-                api_rate_limiter.wait_for_slot()
-                review_response = chat.send_message([review_prompt, raw_snippet])
+                parts_for_review = [review_prompt, raw_snippet]
+                token_count_review = model.count_tokens(parts_for_review).total_tokens
+                print(f"  -> Snippet review request will use {token_count_review} tokens.")
+                api_rate_limiter.wait_for_slot(token_count_review)
+                review_response = chat.send_message(parts_for_review)
 
                 if not review_response.parts:
                     return 'failed', ws_name, f"Model returned empty on page {i+1} (snippet review)."
@@ -368,6 +420,9 @@ def process_single_worksheet(ws_path, training_files, model):
     except Exception as e:
         if temp_dir_manager: temp_dir_manager.cleanup()
         return 'failed', ws_name, str(e)
+# ===============================================================
+# END: MODIFICATION - INTEGRATING TOKEN-AWARE RATE LIMITING
+# ===============================================================
 
 
 def main():
@@ -379,10 +434,7 @@ def main():
     parser.add_argument("--training-folder", type=str, required=True, help="Path to folder with 'training' PDFs.")
     parser.add_argument("--worksheets-folder", type=str, required=True, help="Path to folder with 'worksheet' PDFs.")
     
-    # *** MODIFIED: Changed default max-workers to a more conservative value (4) ***
-    # This helps prevent an initial burst of simultaneous requests from all workers,
-    # which could immediately trigger the rate limit. A value slightly below the
-    # requests-per-minute limit is a good starting point.
+    # Keeping max workers at a conservative value is good practice with rate limits.
     parser.add_argument("--max-workers", type=int, default=4, help="Max number of worksheets to process in parallel.")
     
     args = parser.parse_args()
@@ -454,7 +506,10 @@ def main():
         print("No worksheet PDFs found to process.")
         return
 
+    # === MODIFICATION START: Corrected model name ===
+    # Your error log shows you are using gemini-2.5-pro, so we set that here.
     model = genai.GenerativeModel('gemini-2.5-pro')
+    # === MODIFICATION END ===
     
     processing_times, success_count, skipped_count, failed_count = [], 0, 0, 0
     total_worksheets = len(worksheet_pdf_paths)
