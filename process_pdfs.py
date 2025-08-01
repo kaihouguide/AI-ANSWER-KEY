@@ -346,7 +346,7 @@ def process_single_worksheet(ws_path, training_files, model):
                 review_response = chat.send_message([review_prompt, raw_snippet])
 
                 if not review_response.parts:
-                    return 'failed', ws_name, f"Model returned empty response on page {i+1} (snippet review)."
+                    return 'failed', ws_name, f"Model returned empty on page {i+1} (snippet review)."
                 
                 refined_snippet = review_response.text.strip().removeprefix("```html").removesuffix("```").strip()
                 
