@@ -12,6 +12,7 @@ A key feature is its page-by-page processing. The script splits a multi-page wor
 *   **Interactive Diagrams**: Automatically generates 2D diagrams with D3.js and mandatory 3D visualizations with Plotly.js for relevant problems.
 *   **Parallel Processing**: Processes multiple worksheet files concurrently to save time.
 *   **Session Caching**: Avoids re-uploading training files on subsequent runs.
+*   **Resumable & Multi-Key**: Supports interruption and can use multiple API keys.
 
 ---
 
@@ -44,6 +45,7 @@ In the project folder, create a file named `.env` and add your API key to it:
 # .env file content
 GOOGLE_API_KEY="KEY HERE"
 ```
+You can add multiple keys for rotation (`GOOGLE_API_KEY_1`, `GOOGLE_API_KEY_2`, etc.) which is recommended.
 
 ### 3. Folder Structure
 
@@ -63,19 +65,19 @@ Execute the script from your terminal, pointing it to your material and workshee
 
 **Basic Command:**
 ```bash
-python process_pdfs.py --training-folder "./training_materials" --worksheets-folder "./worksheets_to_solve"
+python process_pdfs.py --training-folder training_data --worksheets-folder my_worksheets --max-workers 1
 ```
 
 **Command-Line Arguments:**
 
 *   `--training-folder` **(Required)**: Path to the folder with reference PDFs.
 *   `--worksheets-folder` **(Required)**: Path to the folder with worksheets to be solved.
-*   `--max-workers` (Optional): Number of worksheets to process in parallel. Defaults to `1`. but it is changable
+*   `--max-workers` (Optional): Number of worksheets to process in parallel. Defaults to `4`.
 
 **Example with all arguments:**
 ```bash
-python process_pdfs.py --training-folder "./training_materials" --worksheets-folder "./worksheets_to_solve" --max-workers 1
+python process_pdfs.py --training-folder "./training_materials" --worksheets-folder "./worksheets_to_solve" --max-workers 4
 ```
-### THE LESS CONCURRENT THE BETTER THE RESULTS KEEP MAX WORKERS AT 1 AND WAIT  
-* you can generate about 15 answer keys a day with 1 api key a day using 1 worker it takes about 2 and half hours with around 8 mins an answer key
-* The script will show its progress in the terminal. The final `.key.html` answer keys will be saved in the `worksheets_to_solve` folder.
+### A NOTE ON THE NEW SCRIPT:
+* The script is now built for concurrency. Using more workers is better, especially with multiple API keys. It still takes around 8 mins an answer key, but you can do many at once.
+* The script will show its progress in the terminal. The final `.key.html` answer keys will be saved in the `worksheets_to_solve` folder. It now automatically saves progress and will resume if you stop and start it again.
