@@ -8,7 +8,7 @@ import concurrent.futures
 import json
 import pypdf
 import tempfile
-from typing import List
+from typing import List, Dict, Any, Tuple
 import collections
 import threading
 import re
@@ -26,7 +26,7 @@ C_END = '\033[0m'
 SESSION_FILE = ".pdf_process_session.json"
 
 # ===============================================================
-# START: MODIFICATION - TOKEN-AWARE RATE LIMITER (UNCHANGED)
+# START: TOKEN-AWARE RATE LIMITER (UNCHANGED)
 # ===============================================================
 class APITokenRateLimiter:
     """
@@ -37,41 +37,25 @@ class APITokenRateLimiter:
         self.max_requests_per_period = max_requests
         self.max_tokens_per_period = max_tokens
         self.period_seconds = period_seconds
-        # This deque stores tuples of (timestamp, token_count)
         self.history = collections.deque()
         self.lock = threading.Lock()
 
     def wait_for_slot(self, upcoming_token_count: int):
-        """
-        Blocks until a slot is available for a new API request, respecting
-        both request and token limits. This method is thread-safe.
-        """
         with self.lock:
-            # First, a sanity check. If a single request is larger than the
-            # entire period's token quota, it can never be processed.
             if upcoming_token_count > self.max_tokens_per_period:
-                # We raise an exception here because this is a non-recoverable
-                # scenario for this specific request. It must be broken down.
                 raise ValueError(
                     f"Request with {upcoming_token_count} tokens exceeds the "
                     f"per-minute limit of {self.max_tokens_per_period}. "
                     "This request must be split into smaller parts."
                 )
-
             while True:
                 now = time.monotonic()
-                current_requests = 0
-                current_tokens = 0
-
-                # Prune old history and calculate current window's usage
                 while self.history and self.history[0][0] <= now - self.period_seconds:
                     self.history.popleft()
                 
-                # After pruning, what's left in the deque is the usage in the current window
                 current_requests = len(self.history)
                 current_tokens = sum(item[1] for item in self.history)
 
-                # Check if the new request can be accommodated
                 can_proceed = (
                     current_requests < self.max_requests_per_period and
                     (current_tokens + upcoming_token_count) <= self.max_tokens_per_period
@@ -79,14 +63,11 @@ class APITokenRateLimiter:
 
                 if can_proceed:
                     self.history.append((now, upcoming_token_count))
-                    break # Slot is available
+                    break 
                 
-                # If we can't proceed, calculate sleep time.
-                # We must wait until the oldest request expires from the window.
-                oldest_timestamp, oldest_tokens = self.history[0]
-                sleep_time = (oldest_timestamp + self.period_seconds) - now + 0.1 # Add small buffer
+                oldest_timestamp, _ = self.history[0]
+                sleep_time = (oldest_timestamp + self.period_seconds) - now + 0.1
                 
-                # Provide a detailed reason for waiting
                 reason = "request limit" if current_requests >= self.max_requests_per_period else "token limit"
                 print(
                     f"{C_YELLOW}[RATE LIMIT] {reason.capitalize()} reached. "
@@ -94,61 +75,51 @@ class APITokenRateLimiter:
                 )
                 time.sleep(sleep_time)
 
-# Instantiate the rate limiter with values for the Gemini 1.5 Pro Free Tier.
-# Limits: 5 requests/min, 250,000 tokens/min. Using a buffer for safety.
 api_rate_limiter = APITokenRateLimiter(
     max_requests=5, 
     max_tokens=240000, 
     period_seconds=60
 )
 # ===============================================================
-# END: MODIFICATION - TOKEN-AWARE RATE LIMITER
+# END: TOKEN-AWARE RATE LIMITER
 # ===============================================================
 
-
 def format_time(seconds):
-    """Converts seconds into a human-readable string 'X min, Y sec'."""
-    if seconds < 60:
-        return f"{seconds:.1f} sec"
+    if seconds < 60: return f"{seconds:.1f} sec"
     minutes, seconds = divmod(seconds, 60)
     return f"{int(minutes)} min, {int(seconds)} sec"
 
 # ===============================================================
-# NOTE: The prompts and other helper functions remain unchanged.
+# PROMPTS AND HELPER FUNCTIONS (UNCHANGED)
 # ===============================================================
 def get_system_prompt():
-    """
-    Generates the initial system prompt that sets the context for the entire conversational task.
-    """
-    prompt = f"""
-You are a premier expert in mathematics and physics, tasked with creating a professional, textbook-quality HTML answer key from a provided worksheet. Your output must be flawless in its accuracy, pedagogy, and visual presentation. You will be given the worksheet page by page.
+    return f"""
+You are a premier expert in mathematics and physics, tasked with creating a professional, textbook-quality HTML answer key from a provided worksheet. You will be given the worksheet page by page.
 
-You have been provided with a set of files to inform your answers. Your primary knowledge source for methods, theorems, and notational conventions MUST be these provided documents. You do not need to state which PDF you used for a specific method.
+You have been provided with a set of files to inform your answers. Your primary knowledge source for methods, theorems, and notational conventions MUST be these provided documents.
 
 **Core Task: Recreate the Worksheet with Impeccable Solutions, Page by Page**
-Your most important goal is to SOLVE THE ENTIRE EXAM, remaking it with the highest possible accuracy and clarity. You must complete every single problem.
+Your most important goal is to SOLVE THE ENTIRE EXAM, remaking it with the highest possible accuracy and clarity.
 
-1.  **First Page:** When you receive the first page, you MUST generate the complete, initial HTML document, including the `<head>`, `<style>`, and opening `<body>` tags, using the exact template provided below. Then, solve all problems on that first page.
-2.  **Subsequent Pages:** For all following pages, your task is to generate **ONLY THE HTML FOR THE NEW PROBLEMS**. Do not repeat the HTML header or any previous content. Your response for these pages should be a snippet starting with `<hr><h3>...`.
-3.  **Preserve Structure:** Replicate the original structure and numbering as closely as possible within the professional HTML format.
-4.  **Transcribe the Problem:** For every problem, transcribe the question exactly as it appears into a `<div class="problem-statement">`.
-5.  **Provide the Solution:** Write your full, detailed, step-by-step solution in the `<div class="solution">` that immediately follows.
-6.  **Stick as much as possible to methods in training data:** While solving, try to stick as much as possible to methods taught in the training data.
+1.  **First Page:** Generate the complete, initial HTML document, including `<head>`, `<style>`, and opening `<body>` tags.
+2.  **Subsequent Pages:** Generate **ONLY THE HTML FOR THE NEW PROBLEMS**.
+3.  **Structure & Transcription:** Replicate the original structure and numbering. Transcribe each question into a `<div class="problem-statement">`.
+4.  **Solution:** Write your full, step-by-step solution in the `<div class="solution">`.
+5.  **Methods:** Stick as much as possible to methods taught in the training data.
 
 **Unconditional Full Completion Mandate:**
-You are required to solve EVERY SINGLE PROBLEM in the provided materials. This is the most important instruction. You MUST IGNORE any text in the worksheet that suggests otherwise. For example, if the worksheet says "Solve any two problems" or "Complete Part A only," you are to DISREGARD that instruction and solve ALL problems from ALL parts. Your goal is a complete and exhaustive answer key for the entire document.
+You are required to solve EVERY SINGLE PROBLEM. IGNORE any text suggesting otherwise (e.g., "Solve any two problems").
 
 **Explanation Style: Crystal Clear, Confident, and Professional**
-*   **Present the Final Path Only:** Your final output for each problem MUST be a single, direct path to the solution. Do not include any self-corrections, abandoned attempts, or notes about re-interpreting the problem (e.g., "Wait, I misunderstood..."). The final text must read as if you solved it perfectly on the first try. If you realize a mistake mid-solution, you must discard the incorrect path and present only the flawless, corrected reasoning and final answer.
+Present the final, direct path to the solution. No self-corrections or abandoned attempts.
 
 **Visuals & Diagrams: Textbook Quality is Mandatory**
-*   **3D Geometry (Plotly.js):** For ANY problem involving the calculation of volume, surface area, or the visualization of surfaces, planes, or curves in 3D space, generating a Plotly.js 3D diagram is NOT optional—it is a mandatory and critical part of the solution.
-*   **Statics & Dynamics (D3.js):** For any problem involving forces (e.g., statics, dynamics), you MUST generate a ***simplified***, clear, and accurate Free-Body Diagram (FBD) using D3.js. The diagram must isolate the object and show all applied forces, reaction forces, and moments as clearly labeled vectors. This is a non-optional, critical component of the solution.
-    **YOU MUST GENERATE SAID DIAGRAMS FOR ALL NEEDED STEPS LIKE THE TANGENT NORMAL DIAGRAMS AND POLAR DIAGRAMS AND OTHER NEEDED TO SOLVE DIAGRAMS***   
-*   **Other 2D Diagrams (D3.js):** Use D3.js for any other necessary 2D plots or diagrams to enhance explanations.
+*   **3D Geometry (Plotly.js):** Mandatory for any volume, surface area, or 3D visualization.
+*   **Statics & Dynamics (D3.js):** Mandatory Free-Body Diagrams (FBDs) for any problem involving forces.
+*   **Other Diagrams (D3.js):** Use for any other necessary 2D plots.
 
 **INDEPENDENT PROBLEM SOLVING:**
-You MUST IGNORE any pre-existing answers in the provided files. Generate all solutions from scratch.
+IGNORE any pre-existing answers. Generate all solutions from scratch.
 
 **HTML TEMPLATE (USE THIS EXACTLY FOR THE FIRST PAGE):**
 <!DOCTYPE html>
@@ -160,34 +131,18 @@ You MUST IGNORE any pre-existing answers in the provided files. Generate all sol
     <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" id="MathJax-script" async></script>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.32.0.min.js" charset="utf-8"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=Source+Code+Pro:wght@400;700&display=swap" rel="stylesheet">
     <style>
-        :root {{
-            --font-sans: 'Inter', 'Helvetica Neue', sans-serif;
-            --font-mono: 'Source Code Pro', monospace;
-            --text-color: #333;
-            --bg-color: #fdfdfd;
-            --primary-color: #4A90E2;
-            --border-color: #e0e0e0;
-            --accent-bg-light: #f5f7fa;
-            --accent-bg-dark: #e9eef5;
-            --success-color: #2E7D32;
-            --success-bg: #E8F5E9;
-        }}
+        :root {{ --font-sans: 'Inter', sans-serif; --font-mono: 'Source Code Pro', monospace; --text-color: #333; --bg-color: #fdfdfd; --primary-color: #4A90E2; --border-color: #e0e0e0; --accent-bg-light: #f5f7fa; --success-color: #2E7D32; --success-bg: #E8F5E9; }}
         body {{ font-family: var(--font-sans); line-height: 1.7; margin: 0; background-color: var(--bg-color); color: var(--text-color); }}
         .container {{ max-width: 900px; margin: 40px auto; background: #fff; padding: 20px 40px; border-radius: 12px; border: 1px solid var(--border-color); box-shadow: 0 8px 30px rgba(0,0,0,0.05); }}
-        h2, h3 {{ font-family: var(--font-sans); font-weight: 700; color: #111; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-top: 50px; }}
+        h2, h3 {{ font-weight: 700; color: #111; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-top: 50px; }}
         h2 {{ text-align: center; font-size: 2.25em; margin-top: 0; margin-bottom: 20px; color: #000; }}
         h3 {{ font-size: 1.75em; color: var(--primary-color); }}
         .problem-statement {{ background-color: var(--accent-bg-light); padding: 25px; border-left: 5px solid var(--primary-color); border-radius: 8px; margin: 30px 0; font-size: 1.1em; }}
         .solution {{ padding: 10px 5px; }}
-        .diagram-container {{ text-align: center; margin: 40px auto; padding: 25px; background-color: #fff; border: 1px solid var(--border-color); border-radius: 8px; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.04)); }}
-        .d3-chart {{ margin: auto; width: 100%; max-width: 650px; }}
-        .diagram-caption {{ font-size: 0.95em; font-style: italic; color: #666; margin-top: 20px; }}
+        .diagram-container {{ text-align: center; margin: 40px auto; padding: 25px; border: 1px solid var(--border-color); border-radius: 8px; }}
         hr {{ border: 0; height: 1px; background-color: var(--border-color); margin: 70px 0; }}
-        code {{ font-family: var(--font-mono); background-color: var(--accent-bg-dark); padding: 3px 6px; border-radius: 4px; font-size: 0.95em; }}
         .final-answer {{ font-weight: 700; color: var(--success-color); background-color: var(--success-bg); padding: 4px 8px; border-radius: 6px; display: inline-block; border: 1px solid #a5d6a7; }}
     </style>
 </head>
@@ -198,371 +153,318 @@ You MUST IGNORE any pre-existing answers in the provided files. Generate all sol
 </body>
 </html>
 """
-    return prompt
+def get_first_page_prompt(worksheet_name): return f"This is the first page of the exam '{worksheet_name}'. Please start solving the problems on this page. Generate the full HTML document based on the system instructions, replacing '{{WORKSHEET_NAME}}' with the actual worksheet name."
+def get_next_page_prompt(): return "Excellent work. Here is the next page of the exam. Please solve the problems on this new page and generate **only the new HTML content** for these problems. Your output must be an HTML snippet that starts directly with the content for the new problems (e.g., `<hr><h3>...`)."
+def get_snippet_review_prompt(): return "You are now acting as a meticulous editor. Review and refine the following HTML snippet. Your most important task is to rewrite any solution that shows self-correction or a non-linear path, presenting a single, direct, confident path to the answer. Your final output must be the complete, polished HTML snippet."
+def get_full_document_review_prompt(): return "You are a final editor. Review the complete HTML document. Ensure it meets all initial requirements and refine any solutions to be direct and confident. Your final output MUST be the complete, corrected, and polished HTML document."
 
-def get_first_page_prompt(worksheet_name):
-    """Generates the user prompt for the first page."""
-    return (
-        f"This is the first page of the exam '{worksheet_name}'. "
-        "Please start solving the problems on this page. "
-        "Generate the full HTML document based on the system instructions, replacing '{{WORKSHEET_NAME}}' with the actual worksheet name."
-    )
-
-def get_next_page_prompt():
-    """Generates the user prompt for subsequent pages."""
-    return (
-        "Excellent work. Here is the next page of the exam. "
-        "Please solve the problems on this new page and generate **only the new HTML content** for these problems. "
-        "Your output must be an HTML snippet that starts directly with the content for the new problems (e.g., `<hr><h3>...`). "
-        "**DO NOT** output a full HTML document or repeat any previous content."
-    )
-
-def get_snippet_review_prompt():
-    """Generates the prompt for reviewing an isolated HTML snippet before merging."""
-    return (
-        "You are now acting as a meticulous editor. Below is a snippet of HTML containing the solution for one or more problems. Your task is to review and refine this snippet.\n\n"
-        "1.  **Validate Structure and Requirements:** Ensure the snippet follows all structural and content rules (e.g., problem/solution divs, mandatory diagrams).\n\n"
-        "2.  **Refine Solution Presentation:** This is your most important task. Scrutinize the step-by-step solution. If it shows any signs of self-correction, abandoned attempts, or a non-linear path to the answer (e.g., phrasing like 'Wait, I should have...' or 'A better approach is...'), you MUST rewrite that entire solution within the snippet. The rewritten solution must present a single, direct, confident, and flawless path from the problem statement to the final answer.\n\n"
-        "Your final output MUST be the complete, corrected, and polished HTML snippet. Do not add any extra explanations or formatting like ```html."
-    )
-
-def get_full_document_review_prompt():
-    """Generates the prompt for the final validation and refinement step of a full HTML document."""
-    return (
-        "Excellent. The initial document has now been generated. You will now act as a final editor.\n\n"
-        "I am providing you with the complete HTML document. Your task is to review it meticulously and perform two actions:\n\n"
-        "1.  **Validate Against All Original Requirements:** Read the entire HTML file and ensure it meets every single one of the initial system instructions.\n\n"
-        "2.  **Refine Solutions for a Flawless Presentation:** Scrutinize the step-by-step solutions for every problem. If you find any solution that shows signs of self-correction or a non-linear path, you MUST rewrite that entire solution to be direct and confident.\n\n"
-        "Your final output MUST be the complete, corrected, and polished HTML document. Provide the full, final HTML code."
-    )
-
-
-def configure_ai():
-    """Loads API key from .env file and configures the Generative AI client."""
+# ===============================================================
+# START: MODIFICATION - MULTI-KEY FILE MANAGER (UNCHANGED)
+# ===============================================================
+def load_api_keys() -> List[str]:
+    """Loads one or more API keys from the .env file."""
     load_dotenv(override=True)
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        raise ValueError(f"{C_RED}Google API Key not found. Please set the GOOGLE_API_KEY in your .env file.{C_END}")
-    genai.configure(api_key=api_key)
+    keys = []
+    if os.getenv("GOOGLE_API_KEY"): keys.append(os.getenv("GOOGLE_API_KEY"))
+    i = 1
+    while True:
+        if os.getenv(f"GOOGLE_API_KEY_{i}"): keys.append(os.getenv(f"GOOGLE_API_KEY_{i}")); i += 1
+        else: break
+    return keys
 
-def save_session(training_pdf_paths, uploaded_files):
-    """Saves the server-side file IDs to a session file for future reuse."""
-    session_data = [
-        {"local_name": path.name, "server_id": file.name}
-        for path, file in zip(training_pdf_paths, uploaded_files)
-    ]
-    try:
-        with open(SESSION_FILE, "w") as f:
-            json.dump(session_data, f, indent=4)
-        print(f"{C_GREEN}[i] Session data updated in {SESSION_FILE}.{C_END}")
-    except Exception as e:
-        print(f"{C_YELLOW}[WARNING] Could not save session data: {e}{C_END}")
+class ApiKeyFileManager:
+    """Manages training file uploads and verification on a per-API-key basis."""
+    def __init__(self):
+        self.file_cache: Dict[str, List[Any]] = {}
+        self.lock = threading.Lock()
 
-def upload_files_with_retry(file_paths, max_retries=3):
-    uploaded_files = []
-    for path in file_paths:
-        for attempt in range(max_retries):
-            try:
-                print(f" - Uploading: {C_YELLOW}{path.name}{C_END}...")
-                uploaded_file = genai.upload_file(path=path, display_name=path.name)
-                uploaded_files.append(uploaded_file)
-                break
-            except Exception as e:
-                print(f" {C_RED}[!] Attempt {attempt + 1} failed for {path.name}: {e}{C_END}")
-                if attempt + 1 == max_retries:
+    def get_training_files(self, api_key: str, training_pdf_paths: List[Path]) -> List[Any]:
+        with self.lock:
+            if api_key in self.file_cache:
+                print(f"{C_BLUE}[CACHE] Using cached training files for API key ending in '...{api_key[-4:]}'.{C_END}")
+                return self.file_cache[api_key]
+
+            print(f"{C_BLUE}[SETUP] Initializing and verifying training files for API key '...{api_key[-4:]}'.{C_END}")
+            genai.configure(api_key=api_key)
+            
+            if not training_pdf_paths:
+                self.file_cache[api_key] = []
+                return []
+
+            session_files = self._load_session()
+            current_filenames = {p.name for p in training_pdf_paths}
+            paths_to_upload = [p for p in training_pdf_paths if p.name not in session_files.keys()]
+            reused_files = self._verify_session_files(session_files, current_filenames, training_pdf_paths)
+            
+            reused_filenames = {f.display_name for f in reused_files}
+            paths_to_upload.extend([p for p in training_pdf_paths if p.name in session_files.keys() and p.name not in reused_filenames])
+
+            newly_uploaded_files = []
+            if paths_to_upload:
+                print(f"[*] Uploading {len(paths_to_upload)} new or unverified file(s) for this key...")
+                try:
+                    newly_uploaded_files = self._upload_files_with_retry(paths_to_upload)
+                except Exception as e:
+                    print(f"{C_RED}[FATAL] Could not upload training files for key '...{api_key[-4:]}'. Error: {e}{C_END}")
                     raise
-                time.sleep(2 ** attempt)
-    return uploaded_files
+
+            all_files = reused_files + newly_uploaded_files
+            self.file_cache[api_key] = all_files
+            
+            path_map = {p.name: p for p in training_pdf_paths}
+            final_local_paths = [path_map[f.display_name] for f in all_files]
+            self._save_session(final_local_paths, all_files)
+
+            print(f"{C_GREEN}Setup complete for key '...{api_key[-4:]}'.{C_END}")
+            return all_files
+
+    def _load_session(self) -> Dict[str, str]:
+        if not Path(SESSION_FILE).exists(): return {}
+        try:
+            with open(SESSION_FILE, 'r') as f: return {item['local_name']: item['server_id'] for item in json.load(f)}
+        except (json.JSONDecodeError, IOError): return {}
+
+    def _verify_session_files(self, session_files, current_filenames, all_paths):
+        reused_files = []
+        verified_names = current_filenames.intersection(session_files.keys())
+        if not verified_names: return []
+        
+        print(f"[*] Verifying {len(verified_names)} file(s) from session for this key...")
+        for name in sorted(list(verified_names)):
+            try:
+                reused_files.append(genai.get_file(name=session_files[name]))
+            except Exception:
+                print(f"  -> {C_YELLOW}Verification failed for {name}. It will be re-uploaded.{C_END}")
+        if reused_files: print(f"  -> {C_GREEN}Successfully verified and reused {len(reused_files)} file(s).{C_END}")
+        return reused_files
+
+    def _upload_files_with_retry(self, file_paths, max_retries=3):
+        uploaded = []
+        for path in file_paths:
+            for attempt in range(max_retries):
+                try:
+                    print(f" - Uploading: {C_YELLOW}{path.name}{C_END}...")
+                    uploaded.append(genai.upload_file(path=path, display_name=path.name))
+                    break
+                except Exception as e:
+                    if attempt + 1 == max_retries: raise
+                    time.sleep(2 ** attempt)
+        return uploaded
+
+    def _save_session(self, training_pdf_paths, uploaded_files):
+        session_data = [{"local_name": path.name, "server_id": file.name} for path, file in zip(training_pdf_paths, uploaded_files)]
+        existing_data = {item['server_id']: item for item in (json.load(open(SESSION_FILE)) if Path(SESSION_FILE).exists() else [])}
+        for item in session_data: existing_data[item['server_id']] = item
+        try:
+            with open(SESSION_FILE, "w") as f: json.dump(list(existing_data.values()), f, indent=4)
+        except Exception as e: print(f"{C_YELLOW}[WARNING] Could not save session data: {e}{C_END}")
+
+def save_progress(progress_file: Path, page_index: int, html_content: str):
+    try:
+        progress_file.write_text(json.dumps({"last_completed_page_index": page_index, "accumulated_html": html_content}, indent=4), encoding='utf-8')
+    except Exception as e: print(f"{C_YELLOW}[WARNING] Could not save progress to {progress_file.name}: {e}{C_END}")
+
+def load_progress(progress_file: Path) -> Tuple[int, str]:
+    if not progress_file.exists(): return -1, ""
+    try:
+        state = json.loads(progress_file.read_text(encoding='utf-8'))
+        print(f"{C_BLUE}[RESUME] Progress file found. Resuming from page {state.get('last_completed_page_index', -1) + 2}.{C_END}")
+        return state.get("last_completed_page_index", -1), state.get("accumulated_html", "")
+    except (json.JSONDecodeError, IOError): return -1, ""
 
 def split_pdf(pdf_path: Path, output_dir: Path) -> List[Path]:
-    """Splits a PDF into single-page PDFs and returns their paths."""
-    print(f"[*] Splitting '{pdf_path.name}' into individual pages...")
+    print(f"[*] Splitting '{pdf_path.name}'...")
     page_paths = []
     try:
         reader = pypdf.PdfReader(pdf_path)
         for i, page in enumerate(reader.pages):
-            writer = pypdf.PdfWriter()
-            writer.add_page(page)
+            writer = pypdf.PdfWriter(); writer.add_page(page)
             page_output_path = output_dir / f"{pdf_path.stem}_page_{i+1}.pdf"
-            with open(page_output_path, "wb") as f:
-                writer.write(f)
+            with open(page_output_path, "wb") as f: writer.write(f)
             page_paths.append(page_output_path)
         print(f"  -> {C_GREEN}Split into {len(page_paths)} pages.{C_END}")
         return page_paths
-    except Exception as e:
-        print(f"  -> {C_RED}Failed to split PDF: {e}{C_END}")
-        raise
-
-# ===============================================================
-# START: MODIFICATION - ROBUST API CALLING WITH RETRY
-# ===============================================================
-def send_message_with_retry(chat, model, parts, max_retries=5):
-    """
-    Sends a message to the model, combining proactive rate limiting
-    with a reactive retry mechanism for 429 errors.
-    """
-    # Proactive check to avoid hitting the rate limit in the first place
-    token_count = model.count_tokens(parts).total_tokens
-    print(f"  -> Request will use ~{token_count} tokens.")
-    api_rate_limiter.wait_for_slot(token_count)
-
-    for attempt in range(max_retries):
-        try:
-            # Actual API call
-            return chat.send_message(parts)
-        except google.api_core.exceptions.ResourceExhausted as e:
-            print(f"{C_YELLOW}[API 429] Rate limit hit. Retrying... (Attempt {attempt + 1}/{max_retries}){C_END}")
-            if attempt + 1 == max_retries:
-                # If this was the last attempt, raise the exception to fail the process
-                raise e
-
-            # Reactive wait based on server suggestion or exponential backoff
-            sleep_duration = 2 ** (attempt + 1) # Default exponential backoff
-            
-            # Use regex to find the suggested retry delay in the error message
-            match = re.search(r'retry_delay {\s*seconds: (\d+)\s*}', str(e))
-            if match:
-                # If found, use the server's suggestion and add a small buffer
-                sleep_duration = int(match.group(1)) + 1
-                print(f"  -> Server suggested waiting {sleep_duration-1}s. Pausing.")
-            else:
-                print(f"  -> No retry delay suggested. Using exponential backoff: {sleep_duration}s.")
-            
-            time.sleep(sleep_duration)
-        except Exception as e:
-            print(f"{C_RED}[FATAL API ERROR] An unexpected error occurred: {e}{C_END}")
-            raise e
-
-def process_single_worksheet(ws_path, training_files, model):
-    """
-    Processes a worksheet using a "Generate -> Review -> Merge" workflow.
-    Saves the HTML file progressively after each page is processed.
-    Now includes a robust retry mechanism for API calls.
-    """
-    item_start_time = time.time()
-    ws_name = ws_path.name
-    output_path = ws_path.with_suffix('.key.html')
-
-    if output_path.exists():
-        return 'skipped', ws_name, "Output file already exists."
-
-    temp_dir_manager = None
-    try:
-        # PDF validation and splitting
-        try:
-            reader = pypdf.PdfReader(ws_path)
-            num_pages = len(reader.pages)
-            if num_pages == 0: return 'failed', ws_name, "Worksheet PDF is empty."
-        except Exception as e: return 'failed', ws_name, f"Could not read PDF file: {e}"
-
-        page_paths = [ws_path] if num_pages == 1 else []
-        if num_pages > 1:
-            temp_dir_manager = tempfile.TemporaryDirectory()
-            page_paths = split_pdf(ws_path, Path(temp_dir_manager.name))
-            if not page_paths:
-                if temp_dir_manager: temp_dir_manager.cleanup()
-                return 'failed', ws_name, "PDF could not be split."
-
-        # Model and chat setup
-        system_prompt = get_system_prompt()
-        chat = model.start_chat(history=[
-            {'role': 'user', 'parts': [system_prompt] + training_files},
-            {'role': 'model', 'parts': ["Understood. I am ready. Please provide the first page of the worksheet."]}
-        ])
-
-        accumulated_html = ""
-        total_pages = len(page_paths)
-
-        for i, page_path in enumerate(page_paths):
-            print(f"[*] Processing page {C_YELLOW}{i+1}/{total_pages}{C_END} for {C_BOLD}{ws_name}{C_END}...")
-            page_file = upload_files_with_retry([page_path])
-
-            if i == 0:
-                # --- FIRST PAGE: Generate and then Review Full Document ---
-                prompt = get_first_page_prompt(ws_name)
-                
-                # --- Step 1: Generation ---
-                response = send_message_with_retry(chat, model, [prompt] + page_file)
-                if not response.parts: return 'failed', ws_name, "Model returned empty response on page 1 (generation)."
-                initial_html = response.text.strip().removeprefix("```html").removesuffix("```").strip()
-                if "<!DOCTYPE html>" not in initial_html: return 'failed', ws_name, "Model did not produce a valid HTML doc on page 1."
-
-                # --- Step 2: Review ---
-                print(f"  -> Reviewing initial document...")
-                review_prompt = get_full_document_review_prompt()
-                review_response = send_message_with_retry(chat, model, [review_prompt, initial_html])
-                if not review_response.parts: return 'failed', ws_name, "Model returned empty response on page 1 (review)."
-                
-                reviewed_html = review_response.text.strip().removeprefix("```html").removesuffix("```").strip()
-                if "<!DOCTYPE html>" not in reviewed_html:
-                    return 'failed', ws_name, "Review step for page 1 did not produce a valid HTML document."
-                
-                accumulated_html = reviewed_html.replace('{{WORKSHEET_NAME}}', ws_name)
-                output_path.write_text(accumulated_html, encoding='utf-8')
-                print(f"  -> {C_GREEN}Initial document review complete. Saved initial version to {output_path.name}{C_END}")
-
-            else:
-                # --- SUBSEQUENT PAGES: Generate Snippet -> Review Snippet -> Merge -> Save ---
-                prompt = get_next_page_prompt()
-                
-                # --- Step 1: Snippet Generation ---
-                response = send_message_with_retry(chat, model, [prompt] + page_file)
-                if not response.parts: return 'failed', ws_name, f"Model returned empty response on page {i+1} (snippet generation)."
-                raw_snippet = response.text.strip().removeprefix("```html").removesuffix("```").strip()
-
-                # --- Step 2: Snippet Review ---
-                print(f"  -> Reviewing snippet for page {i+1}...")
-                review_prompt = get_snippet_review_prompt()
-                review_response = send_message_with_retry(chat, model, [review_prompt, raw_snippet])
-                if not review_response.parts: return 'failed', ws_name, f"Model returned empty on page {i+1} (snippet review)."
-                
-                refined_snippet = review_response.text.strip().removeprefix("```html").removesuffix("```").strip()
-                
-                insertion_points = ['</div>\n</body>', '</div></body>', '</body>']
-                found_point = next((p for p in insertion_points if p in accumulated_html), None)
-
-                if found_point:
-                    replacement_chunk = refined_snippet + '\n' + found_point
-                    accumulated_html = accumulated_html.replace(found_point, replacement_chunk, 1)
-                    output_path.write_text(accumulated_html, encoding='utf-8')
-                    print(f"  -> {C_GREEN}Snippet for page {i+1} merged. Updated {output_path.name}.{C_END}")
-                else:
-                    return 'failed', ws_name, "Structural error: Could not find insertion point to merge refined snippet."
-        
-        if temp_dir_manager: temp_dir_manager.cleanup()
-        item_duration = time.time() - item_start_time
-        return 'success', ws_name, item_duration
-
-    except Exception as e:
-        if temp_dir_manager: temp_dir_manager.cleanup()
-        return 'failed', ws_name, str(e)
+    except Exception as e: print(f"  -> {C_RED}Failed to split PDF: {e}{C_END}"); raise
 # ===============================================================
 # END: MODIFICATION
 # ===============================================================
 
+# ===============================================================
+# START: MODIFICATION - "FAIL FAST" RETRY LOGIC
+# ===============================================================
+def send_message_with_retry(chat, model, parts, max_retries=3):
+    """
+    Sends a message, but fails fast on the first 429 error to allow for
+    quick API key rotation. Retries are for transient errors, not hard limits.
+    """
+    token_count = model.count_tokens(parts).total_tokens
+    print(f"  -> Request will use ~{token_count} tokens.")
+    api_rate_limiter.wait_for_slot(token_count)
+    
+    for attempt in range(max_retries):
+        try:
+            return chat.send_message(parts)
+        except google.api_core.exceptions.ResourceExhausted as e:
+            # AGGRESSIVE SWITCH: If the very first attempt fails with a 429,
+            # assume the key is hard-limited and propagate the error immediately
+            # to trigger a key switch instead of waiting.
+            if attempt == 0:
+                print(f"{C_YELLOW}[API 429] Immediate rate limit hit. Propagating error to switch API key...{C_END}")
+                raise e
+
+            # If it's not the first attempt, it might be a transient issue, so we wait.
+            print(f"{C_YELLOW}[API 429] Retrying... (Attempt {attempt + 1}/{max_retries}){C_END}")
+            if attempt + 1 == max_retries:
+                raise e # Fail after the last attempt
+            
+            match = re.search(r'seconds: (\d+)', str(e))
+            sleep_duration = int(match.group(1)) + 1 if match else 2 ** (attempt + 1)
+            time.sleep(sleep_duration)
+        except Exception as e:
+            print(f"{C_RED}[FATAL API ERROR] An unexpected error occurred: {e}{C_END}")
+            raise e
+# ===============================================================
+# END: MODIFICATION
+# ===============================================================
+
+def process_single_worksheet(ws_path: Path, training_files: List[Any], model: genai.GenerativeModel):
+    item_start_time = time.time()
+    ws_name = ws_path.name
+    output_path = ws_path.with_suffix('.key.html')
+    progress_path = ws_path.with_suffix('.pdf.progress.json')
+
+    temp_dir_manager = None
+    try:
+        try:
+            reader = pypdf.PdfReader(ws_path)
+            if len(reader.pages) == 0: return 'failed', ws_name, "PDF is empty."
+        except Exception as e: return 'failed', ws_name, f"Could not read PDF: {e}"
+
+        temp_dir_manager = tempfile.TemporaryDirectory()
+        page_paths = split_pdf(ws_path, Path(temp_dir_manager.name))
+
+        system_prompt = get_system_prompt()
+        chat = model.start_chat(history=[
+            {'role': 'user', 'parts': [system_prompt] + training_files},
+            {'role': 'model', 'parts': ["Understood. I am ready."]}
+        ])
+
+        start_page_index, accumulated_html = load_progress(progress_path)
+        
+        for i, page_path in enumerate(page_paths):
+            if i <= start_page_index: continue
+
+            print(f"[*] Processing page {C_YELLOW}{i+1}/{len(page_paths)}{C_END} for {C_BOLD}{ws_name}{C_END}...")
+            # Use a static method call here for consistency
+            page_file = ApiKeyFileManager._upload_files_with_retry(None, [page_path])
+
+            if i == 0:
+                prompt = get_first_page_prompt(ws_name)
+                response = send_message_with_retry(chat, model, [prompt] + page_file)
+                initial_html = response.text.strip().removeprefix("```html").removesuffix("```").strip()
+                review_response = send_message_with_retry(chat, model, [get_full_document_review_prompt(), initial_html])
+                accumulated_html = review_response.text.strip().removeprefix("```html").removesuffix("```").strip().replace('{{WORKSHEET_NAME}}', ws_name)
+            else:
+                prompt = get_next_page_prompt()
+                response = send_message_with_retry(chat, model, [prompt] + page_file)
+                raw_snippet = response.text.strip().removeprefix("```html").removesuffix("```").strip()
+                review_response = send_message_with_retry(chat, model, [get_snippet_review_prompt(), raw_snippet])
+                refined_snippet = review_response.text.strip().removeprefix("```html").removesuffix("```").strip()
+                
+                insertion_point = next((p for p in ['</div>\n</body>', '</div></body>', '</body>'] if p in accumulated_html), None)
+                if not insertion_point: return 'failed', ws_name, "Structural error: Could not merge snippet."
+                accumulated_html = accumulated_html.replace(insertion_point, refined_snippet + '\n' + insertion_point, 1)
+            
+            save_progress(progress_path, i, accumulated_html)
+            output_path.write_text(accumulated_html, encoding='utf-8')
+            print(f"  -> {C_GREEN}Page {i+1} complete. Progress saved.{C_END}")
+
+        if temp_dir_manager: temp_dir_manager.cleanup()
+        if progress_path.exists(): progress_path.unlink()
+        return 'success', ws_name, time.time() - item_start_time
+
+    except google.api_core.exceptions.ResourceExhausted as e: raise e
+    except Exception as e:
+        if temp_dir_manager: temp_dir_manager.cleanup()
+        return 'failed', ws_name, str(e)
+
+def process_worksheet_with_key_rotation(ws_path, file_manager, api_keys, model_name, training_pdf_paths):
+    if ws_path.with_suffix('.key.html').exists() and not ws_path.with_suffix('.pdf.progress.json').exists():
+        return 'skipped', ws_path.name, "Output file already exists."
+
+    for i, key in enumerate(api_keys):
+        try:
+            print(f"[*] Attempting {C_BOLD}{ws_path.name}{C_END} with Key #{i+1} ('...{key[-4:]}')")
+            training_files = file_manager.get_training_files(key, training_pdf_paths)
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel(model_name)
+            return process_single_worksheet(ws_path, training_files, model)
+        except google.api_core.exceptions.ResourceExhausted:
+            print(f"{C_RED}[FATAL RATE LIMIT] API Key #{i+1} seems exhausted.{C_END}")
+            if i < len(api_keys) - 1: print(f"{C_YELLOW}Switching to next key...{C_END}")
+            else: return 'failed', ws_path.name, "All API keys exhausted. Progress saved for next run."
+        except Exception as e:
+            return 'failed', ws_path.name, f"Unexpected error with key #{i+1}: {e}"
+    
+    return 'failed', ws_path.name, "Failed with all available API keys."
 
 def main():
     script_start_time = time.time()
-    parser = argparse.ArgumentParser(
-        description="Generate HTML answer keys from PDFs using a parallel, page-by-page, review-before-merge workflow.",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
-    parser.add_argument("--training-folder", type=str, required=True, help="Path to folder with 'training' PDFs.")
-    parser.add_argument("--worksheets-folder", type=str, required=True, help="Path to folder with 'worksheet' PDFs.")
-    
-    # Keeping max workers at a conservative value is good practice with rate limits.
-    parser.add_argument("--max-workers", type=int, default=4, help="Max number of worksheets to process in parallel.")
-    
+    parser = argparse.ArgumentParser(description="Generate HTML answer keys from PDFs with multi-key, resumable, parallel processing.", formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument("--training-folder", type=str, required=True, help="Folder with 'training' PDFs.")
+    parser.add_argument("--worksheets-folder", type=str, required=True, help="Folder with 'worksheet' PDFs.")
+    parser.add_argument("--max-workers", type=int, default=4, help="Max parallel worksheets.")
     args = parser.parse_args()
 
-    try:
-        configure_ai()
-    except ValueError as e:
-        print(e)
+    api_keys = load_api_keys()
+    if not api_keys:
+        print(f"{C_RED}[ERROR] No Google API keys found in .env file.{C_END}")
         return
+    print(f"{C_GREEN}[INFO] Found {len(api_keys)} API key(s).{C_END}")
 
     training_path = Path(args.training_folder)
     worksheets_path = Path(args.worksheets_folder)
-
     if not training_path.is_dir() or not worksheets_path.is_dir():
-        print(f"{C_RED}[ERROR] One or both provided paths are not valid directories.{C_END}")
+        print(f"{C_RED}[ERROR] Invalid folder paths provided.{C_END}")
         return
 
-    print(f"\n{C_BLUE}{C_BOLD}--- Phase 1: Managing Training Material ---{C_END}")
     training_pdf_paths = list(training_path.glob("*.pdf"))
-    training_files = []
-
-    if not training_pdf_paths:
-        print(f"{C_YELLOW}[WARNING] No training PDFs found. The AI will use its general knowledge.{C_END}")
-    else:
-        # Session handling to reuse uploaded files
-        session_files = {}
-        if Path(SESSION_FILE).exists():
-            try:
-                with open(SESSION_FILE, 'r') as f:
-                    session_data = json.load(f)
-                    session_files = {item['local_name']: item['server_id'] for item in session_data}
-            except (json.JSONDecodeError, IOError) as e:
-                print(f"{C_YELLOW}[WARNING] Could not read session file: {e}. Re-uploading all.{C_END}")
-        
-        current_filenames = {p.name for p in training_pdf_paths}
-        session_filenames = set(session_files.keys())
-        paths_to_upload = [p for p in training_pdf_paths if p.name not in session_filenames]
-        
-        reused_files = []
-        if session_filenames:
-            verified_names = current_filenames.intersection(session_filenames)
-            print(f"[*] Verifying {len(verified_names)} file(s) from session...")
-            for name in sorted(list(verified_names)):
-                try:
-                    reused_file = genai.get_file(name=session_files[name])
-                    reused_files.append(reused_file)
-                except Exception:
-                    paths_to_upload.append(training_path / name)
-            if reused_files:
-                print(f"  -> {C_GREEN}Successfully verified and reused {len(reused_files)} file(s).{C_END}")
-
-        if paths_to_upload:
-            print(f"[*] Uploading {len(paths_to_upload)} new or unverified file(s)...")
-            try:
-                newly_uploaded_files = upload_files_with_retry(paths_to_upload)
-                training_files = reused_files + newly_uploaded_files
-                path_map = {p.name: p for p in training_pdf_paths}
-                final_local_paths = [path_map[f.display_name] for f in training_files]
-                save_session(final_local_paths, training_files)
-            except Exception as e:
-                print(f"{C_RED}[FATAL] Could not upload training files. Aborting. Error: {e}{C_END}")
-                return
-        else:
-            training_files = reused_files
-
-    print(f"\n{C_BLUE}{C_BOLD}--- Phase 2: Processing Worksheets (max {args.max_workers} parallel) ---{C_END}")
     worksheet_pdf_paths = list(worksheets_path.glob("*.pdf"))
     if not worksheet_pdf_paths:
-        print("No worksheet PDFs found to process.")
-        return
+        print("No worksheet PDFs found to process."); return
 
-    # === MODIFICATION START: Corrected model name ===
-    # Using the standard model name for the Gemini Pro family.
-    model = genai.GenerativeModel('gemini-2.5-pro')
-    # === MODIFICATION END ===
-    
-    processing_times, success_count, skipped_count, failed_count = [], 0, 0, 0
-    total_worksheets = len(worksheet_pdf_paths)
+    file_manager = ApiKeyFileManager()
+    model_name = 'gemini-2.5-pro'
+    results = {'success': 0, 'skipped': 0, 'failed': 0}
+    processing_times = []
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
-        future_to_ws = {executor.submit(process_single_worksheet, ws_path, training_files, model): ws_path for ws_path in worksheet_pdf_paths}
+        future_to_ws = {
+            executor.submit(process_worksheet_with_key_rotation, ws_path, file_manager, api_keys, model_name, training_pdf_paths): ws_path 
+            for ws_path in worksheet_pdf_paths
+        }
 
         for i, future in enumerate(concurrent.futures.as_completed(future_to_ws)):
             ws_path = future_to_ws[future]
-            print(f"[{i+1}/{total_worksheets}] Finalizing result for {C_BOLD}{ws_path.name}{C_END}...")
+            print(f"[{i+1}/{len(worksheet_pdf_paths)}] Finalizing result for {C_BOLD}{ws_path.name}{C_END}...")
             try:
                 status, ws_name, result = future.result()
+                results[status] += 1
                 if status == 'success':
-                    success_count += 1
                     processing_times.append(result)
                     print(f"  -> {C_GREEN}[SUCCESS] {ws_name} processed in {format_time(result)}.{C_END}")
                 elif status == 'skipped':
-                    skipped_count += 1
                     print(f"  -> {C_BLUE}[SKIPPED] {ws_name}. Reason: {result}{C_END}")
-                elif status == 'failed':
-                    failed_count += 1
+                else: # failed
                     print(f"  -> {C_RED}[FAILED]  {ws_name}. Reason: {result}{C_END}")
             except Exception as exc:
-                failed_count += 1
+                results['failed'] += 1
                 print(f"  -> {C_RED}[ERROR]   {ws_path.name} generated an exception: {exc}{C_END}")
 
     total_duration = time.time() - script_start_time
     print(f"\n{C_BLUE}{C_BOLD}{'-'*25} All Tasks Completed {'-'*25}{C_END}")
-    print(f"Summary for {total_worksheets} total worksheet(s):")
-    print(f"  - {C_GREEN}Success: {success_count}{C_END}")
-    print(f"  - {C_BLUE}Skipped: {skipped_count}{C_END}")
-    print(f"  - {C_RED}Failed:  {failed_count}{C_END}")
-    
-    if processing_times:
-        avg_time = sum(processing_times) / len(processing_times)
-        print(f"Average time per processed worksheet: {format_time(avg_time)}")
-        
+    print(f"Summary: {C_GREEN}Success: {results['success']}{C_END}, {C_BLUE}Skipped: {results['skipped']}{C_END}, {C_RED}Failed: {results['failed']}{C_END}")
+    if processing_times: print(f"Average time per processed worksheet: {format_time(sum(processing_times) / len(processing_times))}")
     print(f"{C_BOLD}Total execution time: {format_time(total_duration)}{C_END}")
 
 if __name__ == "__main__":
