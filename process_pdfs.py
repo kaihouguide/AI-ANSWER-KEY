@@ -11,6 +11,8 @@ import tempfile
 from typing import List
 import collections
 import threading
+import re
+import google.api_core.exceptions
 
 # --- ANSI Color Codes for Rich Console Output ---
 C_GREEN = '\033[92m'
@@ -24,7 +26,7 @@ C_END = '\033[0m'
 SESSION_FILE = ".pdf_process_session.json"
 
 # ===============================================================
-# START: MODIFICATION - TOKEN-AWARE RATE LIMITER
+# START: MODIFICATION - TOKEN-AWARE RATE LIMITER (UNCHANGED)
 # ===============================================================
 class APITokenRateLimiter:
     """
@@ -92,9 +94,8 @@ class APITokenRateLimiter:
                 )
                 time.sleep(sleep_time)
 
-# Instantiate the rate limiter with values for the Gemini 2.5 Pro Free Tier.
-# We use a slight buffer (240k tokens instead of 250k) for safety.
-# Limits: 5 requests/min, 250,000 tokens/min.
+# Instantiate the rate limiter with values for the Gemini 1.5 Pro Free Tier.
+# Limits: 5 requests/min, 250,000 tokens/min. Using a buffer for safety.
 api_rate_limiter = APITokenRateLimiter(
     max_requests=5, 
     max_tokens=240000, 
@@ -113,7 +114,7 @@ def format_time(seconds):
     return f"{int(minutes)} min, {int(seconds)} sec"
 
 # ===============================================================
-# NOTE: The prompts and HTML template remain unchanged.
+# NOTE: The prompts and other helper functions remain unchanged.
 # ===============================================================
 def get_system_prompt():
     """
@@ -293,12 +294,50 @@ def split_pdf(pdf_path: Path, output_dir: Path) -> List[Path]:
         raise
 
 # ===============================================================
-# START: MODIFICATION - INTEGRATING TOKEN-AWARE RATE LIMITING
+# START: MODIFICATION - ROBUST API CALLING WITH RETRY
 # ===============================================================
+def send_message_with_retry(chat, model, parts, max_retries=5):
+    """
+    Sends a message to the model, combining proactive rate limiting
+    with a reactive retry mechanism for 429 errors.
+    """
+    # Proactive check to avoid hitting the rate limit in the first place
+    token_count = model.count_tokens(parts).total_tokens
+    print(f"  -> Request will use ~{token_count} tokens.")
+    api_rate_limiter.wait_for_slot(token_count)
+
+    for attempt in range(max_retries):
+        try:
+            # Actual API call
+            return chat.send_message(parts)
+        except google.api_core.exceptions.ResourceExhausted as e:
+            print(f"{C_YELLOW}[API 429] Rate limit hit. Retrying... (Attempt {attempt + 1}/{max_retries}){C_END}")
+            if attempt + 1 == max_retries:
+                # If this was the last attempt, raise the exception to fail the process
+                raise e
+
+            # Reactive wait based on server suggestion or exponential backoff
+            sleep_duration = 2 ** (attempt + 1) # Default exponential backoff
+            
+            # Use regex to find the suggested retry delay in the error message
+            match = re.search(r'retry_delay {\s*seconds: (\d+)\s*}', str(e))
+            if match:
+                # If found, use the server's suggestion and add a small buffer
+                sleep_duration = int(match.group(1)) + 1
+                print(f"  -> Server suggested waiting {sleep_duration-1}s. Pausing.")
+            else:
+                print(f"  -> No retry delay suggested. Using exponential backoff: {sleep_duration}s.")
+            
+            time.sleep(sleep_duration)
+        except Exception as e:
+            print(f"{C_RED}[FATAL API ERROR] An unexpected error occurred: {e}{C_END}")
+            raise e
+
 def process_single_worksheet(ws_path, training_files, model):
     """
     Processes a worksheet using a "Generate -> Review -> Merge" workflow.
     Saves the HTML file progressively after each page is processed.
+    Now includes a robust retry mechanism for API calls.
     """
     item_start_time = time.time()
     ws_name = ws_path.name
@@ -343,28 +382,16 @@ def process_single_worksheet(ws_path, training_files, model):
                 prompt = get_first_page_prompt(ws_name)
                 
                 # --- Step 1: Generation ---
-                parts_for_generation = [prompt] + page_file
-                token_count_gen = model.count_tokens(parts_for_generation).total_tokens
-                print(f"  -> Generation request will use {token_count_gen} tokens.")
-                api_rate_limiter.wait_for_slot(token_count_gen)
-                response = chat.send_message(parts_for_generation)
-                
+                response = send_message_with_retry(chat, model, [prompt] + page_file)
                 if not response.parts: return 'failed', ws_name, "Model returned empty response on page 1 (generation)."
                 initial_html = response.text.strip().removeprefix("```html").removesuffix("```").strip()
-
                 if "<!DOCTYPE html>" not in initial_html: return 'failed', ws_name, "Model did not produce a valid HTML doc on page 1."
 
                 # --- Step 2: Review ---
                 print(f"  -> Reviewing initial document...")
                 review_prompt = get_full_document_review_prompt()
-                parts_for_review = [review_prompt, initial_html]
-                token_count_review = model.count_tokens(parts_for_review).total_tokens
-                print(f"  -> Review request will use {token_count_review} tokens.")
-                api_rate_limiter.wait_for_slot(token_count_review)
-                review_response = chat.send_message(parts_for_review)
-
-                if not review_response.parts:
-                     return 'failed', ws_name, "Model returned empty response on page 1 (review)."
+                review_response = send_message_with_retry(chat, model, [review_prompt, initial_html])
+                if not review_response.parts: return 'failed', ws_name, "Model returned empty response on page 1 (review)."
                 
                 reviewed_html = review_response.text.strip().removeprefix("```html").removesuffix("```").strip()
                 if "<!DOCTYPE html>" not in reviewed_html:
@@ -379,26 +406,15 @@ def process_single_worksheet(ws_path, training_files, model):
                 prompt = get_next_page_prompt()
                 
                 # --- Step 1: Snippet Generation ---
-                parts_for_generation = [prompt] + page_file
-                token_count_gen = model.count_tokens(parts_for_generation).total_tokens
-                print(f"  -> Snippet generation request will use {token_count_gen} tokens.")
-                api_rate_limiter.wait_for_slot(token_count_gen)
-                response = chat.send_message(parts_for_generation)
-
+                response = send_message_with_retry(chat, model, [prompt] + page_file)
                 if not response.parts: return 'failed', ws_name, f"Model returned empty response on page {i+1} (snippet generation)."
                 raw_snippet = response.text.strip().removeprefix("```html").removesuffix("```").strip()
 
                 # --- Step 2: Snippet Review ---
                 print(f"  -> Reviewing snippet for page {i+1}...")
                 review_prompt = get_snippet_review_prompt()
-                parts_for_review = [review_prompt, raw_snippet]
-                token_count_review = model.count_tokens(parts_for_review).total_tokens
-                print(f"  -> Snippet review request will use {token_count_review} tokens.")
-                api_rate_limiter.wait_for_slot(token_count_review)
-                review_response = chat.send_message(parts_for_review)
-
-                if not review_response.parts:
-                    return 'failed', ws_name, f"Model returned empty on page {i+1} (snippet review)."
+                review_response = send_message_with_retry(chat, model, [review_prompt, raw_snippet])
+                if not review_response.parts: return 'failed', ws_name, f"Model returned empty on page {i+1} (snippet review)."
                 
                 refined_snippet = review_response.text.strip().removeprefix("```html").removesuffix("```").strip()
                 
@@ -421,7 +437,7 @@ def process_single_worksheet(ws_path, training_files, model):
         if temp_dir_manager: temp_dir_manager.cleanup()
         return 'failed', ws_name, str(e)
 # ===============================================================
-# END: MODIFICATION - INTEGRATING TOKEN-AWARE RATE LIMITING
+# END: MODIFICATION
 # ===============================================================
 
 
@@ -507,7 +523,7 @@ def main():
         return
 
     # === MODIFICATION START: Corrected model name ===
-    # Your error log shows you are using gemini-2.5-pro, so we set that here.
+    # Using the standard model name for the Gemini Pro family.
     model = genai.GenerativeModel('gemini-2.5-pro')
     # === MODIFICATION END ===
     
