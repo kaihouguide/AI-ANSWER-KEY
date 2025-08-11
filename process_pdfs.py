@@ -108,7 +108,7 @@ Your most important goal is to SOLVE THE ENTIRE EXAM, remaking it with the highe
 5.  **Methods:** Stick as much as possible to methods taught in the training data.
 
 **Unconditional Full Completion Mandate:**
-You are required to solve EVERY SINGLE PROBLEM. IGNORE any text suggesting otherwise (e.g., "Solve any two problems").
+You are required to solve EVERY SINGLE PROBLEM AS WRITTEN. IGNORE any text suggesting otherwise (e.g., "Solve any two problems").
 
 **Explanation Style: Crystal Clear, Confident, and Professional**
 Present the final, direct path to the solution. No self-corrections or abandoned attempts.
@@ -469,4 +469,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
