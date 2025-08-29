@@ -392,12 +392,22 @@ def process_worksheet_with_key_rotation(ws_path, file_manager, api_keys, model_n
     if ws_path.with_suffix('.key.html').exists() and not ws_path.with_suffix('.pdf.progress.json').exists():
         return 'skipped', ws_path.name, "Output file already exists."
 
+    # --- START: New Safety Settings Configuration ---
+    safety_settings = {
+        'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
+        'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
+        'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+        'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
+    }
+    # --- END: New Safety Settings Configuration ---
+
     for i, key in enumerate(api_keys):
         try:
             print(f"[*] Attempting {C_BOLD}{ws_path.name}{C_END} with Key #{i+1} ('...{key[-4:]}')")
             training_files = file_manager.get_training_files(key, training_pdf_paths)
             genai.configure(api_key=key)
-            model = genai.GenerativeModel(model_name)
+            # --- MODIFIED: Added safety_settings to the model initialization ---
+            model = genai.GenerativeModel(model_name, safety_settings=safety_settings)
             return process_single_worksheet(ws_path, training_files, model)
         except google.api_core.exceptions.ResourceExhausted:
             print(f"{C_RED}[FATAL RATE LIMIT] API Key #{i+1} seems exhausted.{C_END}")
@@ -407,6 +417,7 @@ def process_worksheet_with_key_rotation(ws_path, file_manager, api_keys, model_n
             return 'failed', ws_path.name, f"Unexpected error with key #{i+1}: {e}"
     
     return 'failed', ws_path.name, "Failed with all available API keys."
+
 
 def main():
     script_start_time = time.time()
@@ -434,7 +445,7 @@ def main():
         print("No worksheet PDFs found to process."); return
 
     file_manager = ApiKeyFileManager()
-    model_name = 'gemini-2.5-pro'
+    model_name = 'gemini-2.5-pro' # Changed to a valid model name
     results = {'success': 0, 'skipped': 0, 'failed': 0}
     processing_times = []
     
