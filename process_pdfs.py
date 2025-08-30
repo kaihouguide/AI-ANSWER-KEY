@@ -159,7 +159,7 @@ def get_snippet_review_prompt(): return "You are now acting as a meticulous edit
 def get_full_document_review_prompt(): return "You are a final editor. Review the complete HTML document. Ensure it meets all initial requirements and refine any solutions to be direct and confident. Your final output MUST be the complete, corrected, and polished HTML document."
 
 # ===============================================================
-# START: MODIFICATION - MULTI-KEY FILE MANAGER (UNCHANGED)
+# START: MULTI-KEY FILE MANAGER (UNCHANGED)
 # ===============================================================
 def load_api_keys() -> List[str]:
     """Loads one or more API keys from the .env file."""
@@ -286,11 +286,11 @@ def split_pdf(pdf_path: Path, output_dir: Path) -> List[Path]:
         return page_paths
     except Exception as e: print(f"  -> {C_RED}Failed to split PDF: {e}{C_END}"); raise
 # ===============================================================
-# END: MODIFICATION
+# END: MULTI-KEY FILE MANAGER
 # ===============================================================
 
 # ===============================================================
-# START: MODIFICATION - "FAIL FAST" RETRY LOGIC
+# START: "FAIL FAST" RETRY LOGIC (UNCHANGED)
 # ===============================================================
 def send_message_with_retry(chat, model, parts, max_retries=3):
     """
@@ -324,7 +324,7 @@ def send_message_with_retry(chat, model, parts, max_retries=3):
             print(f"{C_RED}[FATAL API ERROR] An unexpected error occurred: {e}{C_END}")
             raise e
 # ===============================================================
-# END: MODIFICATION
+# END: "FAIL FAST" RETRY LOGIC
 # ===============================================================
 
 def process_single_worksheet(ws_path: Path, training_files: List[Any], model: genai.GenerativeModel):
@@ -392,22 +392,35 @@ def process_worksheet_with_key_rotation(ws_path, file_manager, api_keys, model_n
     if ws_path.with_suffix('.key.html').exists() and not ws_path.with_suffix('.pdf.progress.json').exists():
         return 'skipped', ws_path.name, "Output file already exists."
 
-    # --- START: New Safety Settings Configuration ---
+    # --- START: Configuration from AI Studio ---
+    # These settings are configured to match your AI Studio screenshots for consistency.
+    generation_config = {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        # max_output_tokens is removed to allow the model to generate up to its default maximum.
+    }
+    
+    # Safety settings are kept permissive for technical content.
     safety_settings = {
         'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
         'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
         'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
         'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
     }
-    # --- END: New Safety Settings Configuration ---
+    # --- END: Configuration from AI Studio ---
 
     for i, key in enumerate(api_keys):
         try:
             print(f"[*] Attempting {C_BOLD}{ws_path.name}{C_END} with Key #{i+1} ('...{key[-4:]}')")
             training_files = file_manager.get_training_files(key, training_pdf_paths)
             genai.configure(api_key=key)
-            # --- MODIFIED: Added safety_settings to the model initialization ---
-            model = genai.GenerativeModel(model_name, safety_settings=safety_settings)
+
+            # --- MODIFIED: Applying the updated generation_config to the model initialization ---
+            model = genai.GenerativeModel(
+                model_name, 
+                safety_settings=safety_settings,
+                generation_config=generation_config
+            )
             return process_single_worksheet(ws_path, training_files, model)
         except google.api_core.exceptions.ResourceExhausted:
             print(f"{C_RED}[FATAL RATE LIMIT] API Key #{i+1} seems exhausted.{C_END}")
@@ -445,7 +458,8 @@ def main():
         print("No worksheet PDFs found to process."); return
 
     file_manager = ApiKeyFileManager()
-    model_name = 'gemini-2.5-pro' # Changed to a valid model name
+    # Using 'gemini-1.5-pro-latest' to match the likely high-end model in AI Studio.
+    model_name = 'gemini-2.5-pro' 
     results = {'success': 0, 'skipped': 0, 'failed': 0}
     processing_times = []
     
