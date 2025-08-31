@@ -437,7 +437,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate HTML answer keys from PDFs with multi-key, resumable, parallel processing.", formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--training-folder", type=str, required=True, help="Folder with 'training' PDFs.")
     parser.add_argument("--worksheets-folder", type=str, required=True, help="Folder with 'worksheet' PDFs.")
-    parser.add_argument("--max-workers", type=int, default=4, help="Max parallel worksheets.")
+    parser.add_argument("--max-workers", type=int, default=1, help="Max parallel worksheets.")
     args = parser.parse_args()
 
     api_keys = load_api_keys()
