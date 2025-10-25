@@ -41,8 +41,8 @@ Open a terminal in your project folder and run the following command to install 
 ```bash
 pip install google-generativeai python-dotenv pypdf
 ```
-```bash
 install the new api
+```bash
 pip install google-genai
 ```
 **C. Configure Your API Key(s)**
