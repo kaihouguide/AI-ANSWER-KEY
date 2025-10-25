@@ -41,7 +41,10 @@ Open a terminal in your project folder and run the following command to install 
 ```bash
 pip install google-generativeai python-dotenv pypdf
 ```
-
+```bash
+install the new api
+pip install google-genai
+```
 **C. Configure Your API Key(s)**
 
 In the same folder as the script, create a file named `.env`. Add your API key to this file. For best results, add multiple keys. The script will automatically rotate through them as needed.
