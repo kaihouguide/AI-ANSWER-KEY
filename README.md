@@ -2,23 +2,7 @@
 
 AI Answer Keys
 
-This script leverages the Google Gemini 2.5 Pro model to automate the creation of detailed, textbook-quality HTML answer keys from PDF worksheets. It uses a provided set of reference PDFs (e.g., textbooks, lecture notes) as a contextual knowledge base to inform its problem-solving process.
-
-A key feature is its robust page-by-page processing. The script intelligently splits a multi-page worksheet and feeds it to the AI one page at a time. This allows it to build a single, cohesive answer key for large documents without losing context, while also saving progress after each page. If the script is interrupted, it can resume exactly where it left off.
-
-### Core Features
-
-*   **High-Quality AI Solutions**: Generates detailed, step-by-step solutions using the powerful **Gemini 2.5 Pro** model.
-*   **Context-Aware**: Uses a folder of "training" PDFs as a primary knowledge source for methods and notation.
-*   **Rich HTML Output**: Creates clean, professional, and readable HTML answer keys ready for web or print.
-*   **Interactive Diagrams**: Automatically generates 2D diagrams with **D3.js** and mandatory 3D visualizations with **Plotly.js** for relevant problems involving geometry, forces, or data plotting.
-*   **Parallel Processing**: Processes multiple worksheet files concurrently, significantly reducing total processing time.
-*   **Resumable & Fault-Tolerant**: Automatically saves progress after each page. If the script is stopped or fails, it will resume from the last completed page on the next run.
-*   **Multi-API Key Support**: Rotates through multiple API keys automatically if one reaches its rate limit, ensuring continuous operation.
-*   **Intelligent Rate Limiting**: A smart, token-aware rate limiter prevents API errors by managing both request frequency and token count per minute.
-*   **Session Caching**: Avoids the need to re-upload training files on subsequent runs, saving time and bandwidth.
-
----
+Made so i can have more time to learn japanese instead of study for my engineering degree
 
 ## Setup and Usage Guide
 
