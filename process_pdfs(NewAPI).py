@@ -1,5 +1,4 @@
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 import os
 import argparse
 from pathlib import Path
@@ -14,6 +13,9 @@ import collections
 import threading
 import re
 
+# Import types for configuration
+from google.generativeai import GenerationConfig
+from google.generativeai.types import HarmCategory, HarmBlockThreshold, SafetySettingDict
 # --- ANSI Color Codes for Rich Console Output ---
 C_GREEN = '\033[92m'
 C_YELLOW = '\033[93m'
@@ -65,15 +67,19 @@ class APITokenRateLimiter:
                     self.history.append((now, upcoming_token_count))
                     break 
                 
-                oldest_timestamp, _ = self.history[0]
-                sleep_time = (oldest_timestamp + self.period_seconds) - now + 0.1
+                if self.history: # Ensure history is not empty before accessing
+                    oldest_timestamp, _ = self.history[0]
+                    sleep_time = (oldest_timestamp + self.period_seconds) - now + 0.1
+                else: # If history is empty, it means we just popped everything, so no need to sleep
+                    sleep_time = 0.1 # Small sleep to prevent tight loop in case of edge issues
                 
                 reason = "request limit" if current_requests >= self.max_requests_per_period else "token limit"
-                print(
-                    f"{C_YELLOW}[RATE LIMIT] {reason.capitalize()} reached. "
-                    f"Pausing for {sleep_time:.1f} seconds...{C_END}"
-                )
-                time.sleep(sleep_time)
+                if sleep_time > 0: # Only print and sleep if necessary
+                    print(
+                        f"{C_YELLOW}[RATE LIMIT] {reason.capitalize()} reached. "
+                        f"Pausing for {sleep_time:.1f} seconds...{C_END}"
+                    )
+                    time.sleep(sleep_time)
 
 api_rate_limiter = APITokenRateLimiter(
     max_requests=5, 
@@ -178,7 +184,8 @@ class ApiKeyFileManager:
         self.file_cache: Dict[str, List[Any]] = {}
         self.lock = threading.Lock()
 
-    def get_training_files(self, client: genai.Client, api_key: str, training_pdf_paths: List[Path]) -> List[Any]:
+    # The 'client' parameter is no longer needed here as genai functions are global after configure()
+    def get_training_files(self, api_key: str, training_pdf_paths: List[Path]) -> List[Any]:
         with self.lock:
             if api_key in self.file_cache:
                 print(f"{C_BLUE}[CACHE] Using cached training files for API key ending in '...{api_key[-4:]}'.{C_END}")
@@ -186,6 +193,9 @@ class ApiKeyFileManager:
 
             print(f"{C_BLUE}[SETUP] Initializing and verifying training files for API key '...{api_key[-4:]}'.{C_END}")
             
+            # Configure the API key before any genai calls
+            genai.configure(api_key=api_key)
+
             if not training_pdf_paths:
                 self.file_cache[api_key] = []
                 return []
@@ -193,16 +203,21 @@ class ApiKeyFileManager:
             session_files = self._load_session()
             current_filenames = {p.name for p in training_pdf_paths}
             paths_to_upload = [p for p in training_pdf_paths if p.name not in session_files.keys()]
-            reused_files = self._verify_session_files(client, session_files, current_filenames, training_pdf_paths)
+            
+            # The _verify_session_files also needs to be updated to use genai.get_file()
+            reused_files = self._verify_session_files(session_files, current_filenames, training_pdf_paths)
             
             reused_filenames = {f.display_name for f in reused_files}
-            paths_to_upload.extend([p for p in training_pdf_paths if p.name in session_files.keys() and p.name not in reused_filenames])
+            # Only add paths to upload if they are in session_files but failed verification
+            paths_to_upload.extend([p for p in training_pdf_paths if p.name in session_files.keys() and p.name not in reused_filenames and p not in paths_to_upload])
+
 
             newly_uploaded_files = []
             if paths_to_upload:
                 print(f"[*] Uploading {len(paths_to_upload)} new or unverified file(s) for this key...")
                 try:
-                    newly_uploaded_files = self._upload_files_with_retry(client, paths_to_upload)
+                    # Update to use genai.upload_file()
+                    newly_uploaded_files = self._upload_files_with_retry(paths_to_upload)
                 except Exception as e:
                     print(f"{C_RED}[FATAL] Could not upload training files for key '...{api_key[-4:]}'. Error: {e}{C_END}")
                     raise
@@ -211,6 +226,7 @@ class ApiKeyFileManager:
             self.file_cache[api_key] = all_files
             
             path_map = {p.name: p for p in training_pdf_paths}
+            # Ensure the order of final_local_paths matches all_files for consistent session saving
             final_local_paths = [path_map[f.display_name] for f in all_files]
             self._save_session(final_local_paths, all_files)
 
@@ -223,7 +239,8 @@ class ApiKeyFileManager:
             with open(SESSION_FILE, 'r') as f: return {item['local_name']: item['server_id'] for item in json.load(f)}
         except (json.JSONDecodeError, IOError): return {}
 
-    def _verify_session_files(self, client: genai.Client, session_files, current_filenames, all_paths):
+    # The 'client' parameter is no longer needed here
+    def _verify_session_files(self, session_files, current_filenames, all_paths):
         reused_files = []
         verified_names = current_filenames.intersection(session_files.keys())
         if not verified_names: return []
@@ -231,27 +248,26 @@ class ApiKeyFileManager:
         print(f"[*] Verifying {len(verified_names)} file(s) from session for this key...")
         for name in sorted(list(verified_names)):
             try:
-                file_info = client.files.get(name=session_files[name])
+                # Update to use genai.get_file()
+                file_info = genai.get_file(name=session_files[name])
                 reused_files.append(file_info)
             except Exception:
                 print(f"  -> {C_YELLOW}Verification failed for {name}. It will be re-uploaded.{C_END}")
         if reused_files: print(f"  -> {C_GREEN}Successfully verified and reused {len(reused_files)} file(s).{C_END}")
         return reused_files
 
-    def _upload_files_with_retry(self, client: genai.Client, file_paths, max_retries=3):
+    # The 'client' parameter is no longer needed here
+    def _upload_files_with_retry(self, file_paths, max_retries=3):
         uploaded = []
         for path in file_paths:
             for attempt in range(max_retries):
                 try:
                     print(f" - Uploading: {C_YELLOW}{path.name}{C_END}...")
-                    with open(path, 'rb') as f:
-                        file_info = client.files.upload(
-                            file=f, 
-                            config={
-                                'display_name': path.name,
-                                'mime_type': 'application/pdf'
-                            }
-                        )
+                    # Update to use genai.upload_file()
+                    file_info = genai.upload_file(
+                        path=str(path), # genai.upload_file expects a path string or file-like object
+                        display_name=path.name,
+                    )
                     uploaded.append(file_info)
                     break
                 except Exception as e:
@@ -261,8 +277,21 @@ class ApiKeyFileManager:
 
     def _save_session(self, training_pdf_paths, uploaded_files):
         session_data = [{"local_name": path.name, "server_id": file.name} for path, file in zip(training_pdf_paths, uploaded_files)]
-        existing_data = {item['server_id']: item for item in (json.load(open(SESSION_FILE)) if Path(SESSION_FILE).exists() else [])}
-        for item in session_data: existing_data[item['server_id']] = item
+        
+        # Load existing data to merge, if any
+        existing_data = {}
+        if Path(SESSION_FILE).exists():
+            try:
+                with open(SESSION_FILE, 'r') as f:
+                    for item in json.load(f):
+                        existing_data[item['server_id']] = item
+            except json.JSONDecodeError:
+                pass # If file is malformed, start fresh
+
+        # Merge new session data
+        for item in session_data:
+            existing_data[item['server_id']] = item
+
         try:
             with open(SESSION_FILE, "w") as f: json.dump(list(existing_data.values()), f, indent=4)
         except Exception as e: print(f"{C_YELLOW}[WARNING] Could not save session data: {e}{C_END}")
@@ -298,19 +327,17 @@ def split_pdf(pdf_path: Path, output_dir: Path) -> List[Path]:
 # ===============================================================
 
 # ===============================================================
-# START: "FAIL FAST" RETRY LOGIC (UPDATED FOR google-genai)
+# START: "FAIL FAST" RETRY LOGIC (FIXED count_tokens)
 # ===============================================================
-def send_message_with_retry(chat, client: genai.Client, parts, model_id: str, max_retries=3):
+def send_message_with_retry(model, chat, parts, max_retries=3):
     """
     Sends a message, but fails fast on the first 429 error to allow for
     quick API key rotation. Retries are for transient errors, not hard limits.
     """
-    # Token counting with google-genai (with error handling)
+    # Token counting with google-genai - FIXED VERSION
     try:
-        token_count = client.models.count_tokens(
-            model=model_id,
-            contents=parts
-        ).total_tokens
+        # Use the model's count_tokens method instead of genai.count_tokens
+        token_count = model.count_tokens(parts).total_tokens
         print(f"  -> Request will use ~{token_count} tokens.")
         api_rate_limiter.wait_for_slot(token_count)
     except Exception as e:
@@ -342,7 +369,8 @@ def send_message_with_retry(chat, client: genai.Client, parts, model_id: str, ma
 # END: "FAIL FAST" RETRY LOGIC
 # ===============================================================
 
-def process_single_worksheet(ws_path: Path, training_files: List[Any], client: genai.Client, model_id: str, generation_config: dict):
+# 'client' parameter removed from this function as well.
+def process_single_worksheet(ws_path: Path, training_files: List[Any], model_id: str, generation_config: dict, safety_settings: List[SafetySettingDict]):
     item_start_time = time.time()
     ws_name = ws_path.name
     output_path = ws_path.with_suffix('.key.html')
@@ -360,24 +388,28 @@ def process_single_worksheet(ws_path: Path, training_files: List[Any], client: g
 
         system_prompt = get_system_prompt()
         
-        # Create initial contents with training files
-        initial_contents = [system_prompt] + training_files
-        
-        # Create chat with google-genai
-        print(f"[*] Creating chat session with {len(training_files)} training files...")
-        chat = client.chats.create(
-            model=model_id,
-            config=types.GenerateContentConfig(
+        # Initialize the model
+        model = genai.GenerativeModel(
+            model_name=model_id,
+            system_instruction=system_prompt, # system instruction is now part of model init
+            safety_settings=safety_settings,
+            generation_config=GenerationConfig( # Use GenerationConfig type
                 temperature=generation_config.get('temperature', 1.0),
                 top_p=generation_config.get('top_p', 0.95),
-                system_instruction=system_prompt
             )
         )
         
-        # Send initial message with training files
-        print(f"[*] Sending training files to model...")
-        response = chat.send_message(training_files)
-        print(f"  -> Model acknowledged training files.")
+        # Start a chat session
+        # The first message in start_chat is usually the user's initial prompt,
+        # but here we're conceptually providing training files before the real conversation starts.
+        # The training files are handled as part of `genai.configure_model` or by being part of the initial `contents`
+        # when a model is instantiated for multi-turn conversational use.
+        # For multi-modal (text + file) conversational turns, it's better to pass them directly
+        # in the send_message call.
+        
+        print(f"[*] Starting chat session with model {model_id}...")
+        # Start chat with a blank initial history, training files will be sent in the first actual message.
+        chat = model.start_chat(history=[])
 
         start_page_index, accumulated_html = load_progress(progress_path)
         
@@ -386,27 +418,30 @@ def process_single_worksheet(ws_path: Path, training_files: List[Any], client: g
 
             print(f"[*] Processing page {C_YELLOW}{i+1}/{len(page_paths)}{C_END} for {C_BOLD}{ws_name}{C_END}...")
             
-            # Upload page file
-            with open(page_path, 'rb') as f:
-                page_file = client.files.upload(
-                    file=f, 
-                    config={
-                        'display_name': page_path.name,
-                        'mime_type': 'application/pdf'
-                    }
-                )
+            # Upload page file using genai.upload_file()
+            # It's generally better to upload files once and get their File objects,
+            # then pass the File objects in the `send_message` call.
+            page_file = genai.upload_file(
+                path=str(page_path), 
+                display_name=page_path.name,
+            )
 
             if i == 0:
                 prompt = get_first_page_prompt(ws_name)
-                response = send_message_with_retry(chat, client, [prompt, page_file], model_id)
+                # First message includes system prompt text, training files, and the first page
+                # The prompt has the context needed.
+                contents_for_first_page = [prompt] + training_files + [page_file]
+                response = send_message_with_retry(model, chat, contents_for_first_page)
+                
                 initial_html = response.text.strip().removeprefix("```html").removesuffix("```").strip()
-                review_response = send_message_with_retry(chat, client, [get_full_document_review_prompt(), initial_html], model_id)
+                review_response = send_message_with_retry(model, chat, [get_full_document_review_prompt(), initial_html])
                 accumulated_html = review_response.text.strip().removeprefix("```html").removesuffix("```").strip().replace('{{WORKSHEET_NAME}}', ws_name)
             else:
                 prompt = get_next_page_prompt()
-                response = send_message_with_retry(chat, client, [prompt, page_file], model_id)
+                # Subsequent messages include the prompt and the new page file
+                response = send_message_with_retry(model, chat, [prompt, page_file])
                 raw_snippet = response.text.strip().removeprefix("```html").removesuffix("```").strip()
-                review_response = send_message_with_retry(chat, client, [get_snippet_review_prompt(), raw_snippet], model_id)
+                review_response = send_message_with_retry(model, chat, [get_snippet_review_prompt(), raw_snippet])
                 refined_snippet = review_response.text.strip().removeprefix("```html").removesuffix("```").strip()
                 
                 insertion_point = next((p for p in ['</div>\n</body>', '</div></body>', '</body>'] if p in accumulated_html), None)
@@ -437,34 +472,36 @@ def process_worksheet_with_key_rotation(ws_path, file_manager, api_keys, model_n
     }
     
     safety_settings = [
-        types.SafetySetting(
-            category='HARM_CATEGORY_HARASSMENT',
-            threshold='BLOCK_NONE'
-        ),
-        types.SafetySetting(
-            category='HARM_CATEGORY_HATE_SPEECH',
-            threshold='BLOCK_NONE'
-        ),
-        types.SafetySetting(
-            category='HARM_CATEGORY_SEXUALLY_EXPLICIT',
-            threshold='BLOCK_NONE'
-        ),
-        types.SafetySetting(
-            category='HARM_CATEGORY_DANGEROUS_CONTENT',
-            threshold='BLOCK_NONE'
-        ),
-    ]
+    SafetySettingDict(
+        category=HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold=HarmBlockThreshold.BLOCK_NONE
+    ),
+    SafetySettingDict(
+        category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold=HarmBlockThreshold.BLOCK_NONE
+    ),
+    SafetySettingDict(
+        category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold=HarmBlockThreshold.BLOCK_NONE
+    ),
+    SafetySettingDict(
+        category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold=HarmBlockThreshold.BLOCK_NONE
+    ),
+]
 
     for i, key in enumerate(api_keys):
         try:
             print(f"[*] Attempting {C_BOLD}{ws_path.name}{C_END} with Key #{i+1} ('...{key[-4:]}')")
             
-            # Create client for this API key
-            client = genai.Client(api_key=key)
+            # Configure the API key globally for genai functions
+            genai.configure(api_key=key)
             
-            training_files = file_manager.get_training_files(client, key, training_pdf_paths)
+            # file_manager.get_training_files no longer needs the 'client' parameter
+            training_files = file_manager.get_training_files(key, training_pdf_paths)
             
-            return process_single_worksheet(ws_path, training_files, client, model_name, generation_config)
+            # process_single_worksheet no longer needs the 'client' parameter
+            return process_single_worksheet(ws_path, training_files, model_name, generation_config, safety_settings)
         except Exception as e:
             error_str = str(e)
             if '429' in error_str or 'RESOURCE_EXHAUSTED' in error_str or 'quota' in error_str.lower():
@@ -493,48 +530,73 @@ def main():
 
     training_path = Path(args.training_folder)
     worksheets_path = Path(args.worksheets_folder)
+
+    print(f"DEBUG: Training path resolved to: {training_path}")
+    print(f"DEBUG: Worksheets path resolved to: {worksheets_path}")
+
+    # SINGLE folder validation check
     if not training_path.is_dir() or not worksheets_path.is_dir():
         print(f"{C_RED}[ERROR] Invalid folder paths provided.{C_END}")
+        print(f"Training folder exists: {training_path.is_dir()}")
+        print(f"Worksheets folder exists: {worksheets_path.is_dir()}")
         return
 
-    training_pdf_paths = list(training_path.glob("*.pdf"))
-    worksheet_pdf_paths = list(worksheets_path.glob("*.pdf"))
-    if not worksheet_pdf_paths:
-        print("No worksheet PDFs found to process."); return
+    # Get PDF files
+    training_pdfs = sorted(training_path.glob("*.pdf"))
+    worksheet_pdfs = sorted(worksheets_path.glob("*.pdf"))
 
+    if not training_pdfs:
+        print(f"{C_YELLOW}[WARNING] No training PDFs found in {training_path}{C_END}")
+    else:
+        print(f"{C_GREEN}[INFO] Found {len(training_pdfs)} training PDF(s).{C_END}")
+
+    if not worksheet_pdfs:
+        print(f"{C_RED}[ERROR] No worksheet PDFs found in {worksheets_path}{C_END}")
+        return
+    else:
+        print(f"{C_GREEN}[INFO] Found {len(worksheet_pdfs)} worksheet PDF(s).{C_END}")
+
+    # Initialize file manager
     file_manager = ApiKeyFileManager()
-    model_name = 'gemini-2.5-pro'
-    results = {'success': 0, 'skipped': 0, 'failed': 0}
-    processing_times = []
+    model_name = "gemini-2.5-pro"  # or your preferred model
+
+    # Process worksheets
+    print(f"\n{C_BOLD}Starting parallel processing with {args.max_workers} worker(s)...{C_END}\n")
+    
+    results = {'success': [], 'failed': [], 'skipped': []}
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
-        future_to_ws = {
-            executor.submit(process_worksheet_with_key_rotation, ws_path, file_manager, api_keys, model_name, training_pdf_paths): ws_path 
-            for ws_path in worksheet_pdf_paths
+        futures = {
+            executor.submit(
+                process_worksheet_with_key_rotation,
+                ws_path,
+                file_manager,
+                api_keys,
+                model_name,
+                training_pdfs
+            ): ws_path for ws_path in worksheet_pdfs
         }
+        
+        for future in concurrent.futures.as_completed(futures):
+            status, ws_name, detail = future.result()
+            results[status].append((ws_name, detail))
+            
+            if status == 'success':
+                print(f"{C_GREEN}✓ SUCCESS: {ws_name} (took {format_time(detail)}){C_END}")
+            elif status == 'skipped':
+                print(f"{C_BLUE}⊘ SKIPPED: {ws_name} - {detail}{C_END}")
+            else:
+                print(f"{C_RED}✗ FAILED: {ws_name} - {detail}{C_END}")
 
-        for i, future in enumerate(concurrent.futures.as_completed(future_to_ws)):
-            ws_path = future_to_ws[future]
-            print(f"[{i+1}/{len(worksheet_pdf_paths)}] Finalizing result for {C_BOLD}{ws_path.name}{C_END}...")
-            try:
-                status, ws_name, result = future.result()
-                results[status] += 1
-                if status == 'success':
-                    processing_times.append(result)
-                    print(f"  -> {C_GREEN}[SUCCESS] {ws_name} processed in {format_time(result)}.{C_END}")
-                elif status == 'skipped':
-                    print(f"  -> {C_BLUE}[SKIPPED] {ws_name}. Reason: {result}{C_END}")
-                else: # failed
-                    print(f"  -> {C_RED}[FAILED]  {ws_name}. Reason: {result}{C_END}")
-            except Exception as exc:
-                results['failed'] += 1
-                print(f"  -> {C_RED}[ERROR]   {ws_path.name} generated an exception: {exc}{C_END}")
-
-    total_duration = time.time() - script_start_time
-    print(f"\n{C_BLUE}{C_BOLD}{'-'*25} All Tasks Completed {'-'*25}{C_END}")
-    print(f"Summary: {C_GREEN}Success: {results['success']}{C_END}, {C_BLUE}Skipped: {results['skipped']}{C_END}, {C_RED}Failed: {results['failed']}{C_END}")
-    if processing_times: print(f"Average time per processed worksheet: {format_time(sum(processing_times) / len(processing_times))}")
-    print(f"{C_BOLD}Total execution time: {format_time(total_duration)}{C_END}")
+    # Summary
+    total_time = time.time() - script_start_time
+    print(f"\n{C_BOLD}{'='*60}{C_END}")
+    print(f"{C_BOLD}PROCESSING COMPLETE{C_END}")
+    print(f"{C_BOLD}{'='*60}{C_END}")
+    print(f"{C_GREEN}Success: {len(results['success'])}{C_END}")
+    print(f"{C_BLUE}Skipped: {len(results['skipped'])}{C_END}")
+    print(f"{C_RED}Failed: {len(results['failed'])}{C_END}")
+    print(f"\nTotal execution time: {format_time(total_time)}")
 
 if __name__ == "__main__":
     main()
