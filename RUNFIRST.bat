@@ -1,0 +1,1 @@
+pip install google-generativeai python-dotenv pypdf google-genai
