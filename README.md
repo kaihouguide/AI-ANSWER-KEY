@@ -2,7 +2,6 @@
 
 AI Answer Keys
 
-Made so i can have more time to learn japanese instead of study for my engineering degree lol
 
 This script leverages the Google Gemini 2.5 Pro model to automate the creation of detailed, textbook-quality HTML answer keys from PDF worksheets. It uses a provided set of reference PDFs (e.g., textbooks, lecture notes) as a contextual knowledge base to inform its problem-solving process.
 
